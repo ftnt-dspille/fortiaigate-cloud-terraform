@@ -27,7 +27,7 @@ get_vm_name() {
 }
 
 get_zone() {
-  local vm_name="$1"
+  local vm_name="${1:-}"
   if [ -n "$vm_name" ]; then
     local zones_json
     zones_json="$(_tf_output_json zones 2>/dev/null)"
@@ -119,7 +119,9 @@ iap_start_ssh() {
       fi
     done
     kill "$IAP_PID" 2>/dev/null || true
-    if grep -qE "4003|failed to connect to backend" /tmp/iap-tunnel-$$.log 2>/dev/null ||
+    # A VM terraform just created is also invisible to IAP for a while:
+    # "4047: Failed to lookup instance". Both mean "not ready yet" -- retry.
+    if grep -qE "4003|4047|Failed to lookup instance|failed to connect to backend" /tmp/iap-tunnel-$$.log 2>/dev/null ||
        ! grep -q . /tmp/iap-tunnel-$$.log 2>/dev/null; then
       echo "  $vm_name not accepting SSH yet (booting?) -- retry $attempt/8 in 15s"
       sleep 15
