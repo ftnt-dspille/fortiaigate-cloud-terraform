@@ -4,14 +4,18 @@ set -euo pipefail
 # ready.sh -- bring the cloud FortiAIGate lab to "ready for class" in one shot.
 #
 # Idempotent: it inspects each state before acting, so re-running it converges
-# and never duplicates work. Covers the whole chain an instructor needs before
-# the class tooling (../api) adds the student workspaces:
+# and never duplicates work. Covers the whole chain an instructor needs, making
+# `make up` a single operation from any state:
 #
 #   1. VM power   -> if the VM is stopped, hold its GPU (gpu_place.sh) and start
 #                    it (start.sh also heals stale engine pods + waits for scanning).
+#   1b. Deploy    -> k3s not deployed for THIS VM (fresh VM from an image)? deploy_gpu.sh.
+#   1b2. GPU      -> accelerator but no NVIDIA driver? enable_gpu.sh (auto
+#                    reboot-retry; a build-phase image has no driver yet).
 #   1c. GPU model -> move the workshop llama.cpp onto the L4 (llamacpp_gpu.sh),
 #                    front it with the keep-alive proxy and install faig-diag.
-#   2. License   -> if not licensed and a .lic FILE is supplied, upload it.
+#   1e. Bootstrap -> fresh FAIG in needs_setup? setup.sh (org + admin user).
+#   2. License   -> if not licensed: LICENSE=<file.lic> or the $FAIG_LICENSE_POOL pool.
 #   3. Readiness  -> run test.sh's 11 checks (pods, license, GPU, API, model, outage guards,
 #                    llama.cpp, gateway) as the authoritative gate.
 #
@@ -77,6 +81,30 @@ else
   "$SCRIPT_DIR/deploy_gpu.sh" "$VM_NAME"
 fi
 
+# --- 1b2. GPU driver (first GPU boot from a build-phase image) ---------------
+# deploy_gpu.sh runs helm but does NOT install the NVIDIA driver: a VM built
+# from a CPU build-phase image has no driver, and every GPU pod stays Pending.
+# enable_gpu.sh is idempotent (cert fix, gpu role, helm install), so run it
+# whenever the VM has an accelerator and no working nvidia-smi. The driver
+# install usually wants a reboot: on failure reset the VM, wait, retry once.
+ACCEL="$(gcloud compute instances describe "$VM_NAME" --zone="$ZONE" --project="$PROJECT" \
+  --format='value(guestAccelerators)' 2>/dev/null)"
+if [ -n "$ACCEL" ] && ! gcloud compute ssh --tunnel-through-iap --zone="$ZONE" --project="$PROJECT" "$VM_NAME" \
+    --command='sudo nvidia-smi -L' 2>/dev/null | grep -q GPU; then
+  echo "  VM has an accelerator but no NVIDIA driver: running enable_gpu.sh..."
+  if ! "$SCRIPT_DIR/enable_gpu.sh" "$VM_NAME"; then
+    echo "  enable_gpu.sh failed -- resetting the VM (driver installs want a reboot) and retrying once..."
+    gcloud compute instances reset "$VM_NAME" --zone="$ZONE" --project="$PROJECT" >/dev/null
+    for i in $(seq 1 24); do
+      gcloud compute ssh --tunnel-through-iap --zone="$ZONE" --project="$PROJECT" "$VM_NAME" \
+        --command=true >/dev/null 2>&1 && break
+      [ "$i" -eq 24 ] && { echo "  ERROR: no SSH after the reset" >&2; exit 1; }
+      sleep 10
+    done
+    "$SCRIPT_DIR/enable_gpu.sh" "$VM_NAME" || { echo "  ERROR: enable_gpu.sh failed again" >&2; exit 1; }
+  fi
+fi
+
 # --- 1b2. Cap vLLM's GPU share ---------------------------------------------------
 # The chart's 80% leaves no room for the Qwen workshop model beside triton: vLLM then
 # crash-loops and scanning stays off (see the script).
@@ -134,6 +162,22 @@ print('ready' if ok else 'notready')"
     echo "  NOTE: UI cert for $HOSTNAME is self-signed (FAIG_ACME_EMAIL unset)." \
       "Set it in gcp/.env for a trusted cert, then re-run: make up"
   fi
+fi
+
+# --- 1e. Org + admin bootstrap (a fresh FAIG starts in needs_setup) ---------
+# setup.sh is idempotent: it checks /api/v1/setup-status first and no-ops when
+# the org already exists. It needs the admin password (FAIG_ADMIN_PASS or the
+# Keychain item); with neither, skip and say so -- the license step's error
+# will point at the same fix.
+if [ -n "${FAIG_ADMIN_PASS:-}" ] || command -v security >/dev/null 2>&1 && \
+   security find-generic-password -s faig-lab-admin -a "${FAIG_KEYCHAIN_ACCOUNT:-faig-admin}" -w >/dev/null 2>&1; then
+  echo ""
+  echo "== checking FAIG bootstrap (org + admin user) =="
+  "$SCRIPT_DIR/setup.sh" "$VM_NAME"
+else
+  echo ""
+  echo "  NOTE: no FAIG admin password source (FAIG_ADMIN_PASS / Keychain faig-lab-admin):"
+  echo "        skipping bootstrap -- run 'make setup' before licensing."
 fi
 
 # --- 2. License -------------------------------------------------------------

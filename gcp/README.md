@@ -133,18 +133,17 @@ make up                # one VM (INSTANCE=1 default)
 make up COUNT=3        # three VMs: zones, IPs, DNS and certs follow on their own
 ```
 
-`make up` = **converge** (hold a GPU where one exists → `terraform apply` with
-`gpu.tfvars` + `placement.tfvars.json` → drop redundant holds) then
-**ready.sh** per VM: start it, redeploy if the VM was (re)created or moved, put
-llama.cpp on the GPU, license it (`$FAIG_LICENSE_POOL` pool, or `LICENSE=path`
-for a one-off file), and run the 11 readiness checks as the final gate.
+**`make up` is the one operation**: from any state it holds a GPU wherever one
+exists, creates/relocates the VM, redeploys k3s if the VM changed, installs
+the NVIDIA driver if the image lacks one (one automatic reboot-retry), puts
+llama.cpp on the GPU, bootstraps the FAIG org + admin user (needs
+`FAIG_ADMIN_PASS` or the `faig-lab-admin` Keychain item), licenses it
+(`$FAIG_LICENSE_POOL` pool, or `LICENSE=path` for a one-off file), and runs
+the 11 readiness checks as the final gate. Re-running it converges drift and
+never duplicates work.
 
-First time only -- bootstrap the FAIG org + admin user (needs
-`FAIG_ADMIN_PASS`):
-
-```bash
-make setup
-```
+`make gpu`, `make setup` and `make license` still exist as explicit internals
+-- useful when you want to run one step by hand or watch its output.
 
 `make license FILE=path/to.lic` uploads a specific license;
 `make license` (no FILE) allocates from `$FAIG_LICENSE_POOL` and rotates on

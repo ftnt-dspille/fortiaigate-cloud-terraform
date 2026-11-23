@@ -35,7 +35,9 @@ GPU_VARS = -var-file=gpu.tfvars $(if $(wildcard placement.tfvars.json),-var-file
 
 help:
 	@echo "cloud FortiAIGate (INSTANCE=$(INSTANCE)$(if $(COUNT), COUNT=$(COUNT))):"
-	@echo "  make up       any state -> ready: hold a GPU (any zone), create/start/relocate, deploy, license, 11 checks"
+	@echo "  make up       any state -> ready: hold a GPU (any zone), create/start/relocate,"
+	@echo "                deploy, install the GPU driver if missing (auto reboot-retry),"
+	@echo "                bootstrap org+admin, license (pool or LICENSE=), 11 checks"
 	@echo "  make up COUNT=N   run N VMs (remembered); zones, IPs, DNS and certs follow on their own"
 	@echo "  make down     stop all VMs, release GPU holds + static IPs (keeps disks + image)"
 	@echo "  make health   read-only pod/node health of every VM"
