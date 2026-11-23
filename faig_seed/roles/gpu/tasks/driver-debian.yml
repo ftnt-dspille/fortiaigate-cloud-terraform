@@ -1,0 +1,13 @@
+---
+# Install the NVIDIA driver from NVIDIA's CUDA repo. Assumes prereqs.yml and
+# repo-debian.yml have already run. Reboot is typically required for the
+# kernel module to load on first install — main.yml detects this and bails
+# with a clear message.
+
+- name: Install NVIDIA driver (cuda-drivers-{{ nvidia_driver_branch }})
+  ansible.builtin.apt:
+    name: "cuda-drivers-{{ nvidia_driver_branch }}"
+    state: present
+  # DKMS rebuilds the kernel module here; can take 2-5 minutes on slower hosts.
+  async: 1800
+  poll: 30

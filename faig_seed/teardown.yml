@@ -1,0 +1,201 @@
+---
+# Teardown playbook — undo the apps deployed by site.yml, leaving k3s and the
+# rest of the infrastructure (ingress-nginx, NFS provisioner, storage classes)
+# intact. Idempotent: safe to re-run, no-ops if resources are already gone.
+#
+# What this REMOVES:
+#   --tags llamacpp llama.cpp Deployment, Service, Ingress, PVC, PV, namespace
+#   --tags chatbot  chatbot namespace (cascades Deployment/Service/Secret/CM/Ingress)
+#   --tags faig     ~/fortiaigate, ~/my-values.yaml, any stray FAIG tar in $HOME
+#   --tags apps     all three above (default if no tags given)
+#
+# What this PRESERVES (intentional):
+#   - /var/lib/llamacpp        GGUF model file (~GB) — re-install reuses it
+#   - /opt/ansible-chatbot     chatbot source/build dir
+#   - chatbot image in containerd (k3s ctr images)
+#   - k3s itself, ingress-nginx, NFS provisioner, storage classes
+#   - ./licenses/ on the controller (your input data)
+#
+# To wipe the model file too: ssh <host> "rm -rf /var/lib/llamacpp/*" — not done
+# here because it's irreversible and forces a multi-GB re-download on next install.
+#
+# Examples:
+#   ansible-playbook -i inventory teardown.yml                  # all apps
+#   ansible-playbook -i inventory teardown.yml --tags llamacpp  # llama.cpp only
+#   ansible-playbook -i inventory teardown.yml --tags faig      # staging files only
+
+- name: Tear down apps on the GPU server (k3s + on-disk data preserved)
+  hosts: k3s_node
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    # Load each app role's defaults/main.yml without running its install tasks.
+    # public: true exposes the vars to the rest of the play. Using include_role
+    # (vs vars_files / include_vars) keeps these at role-defaults precedence,
+    # so per-host overrides in inventory still win — matching how site.yml
+    # resolves them. See group_vars/all.yml for the precedence rationale.
+    - name: Load llamacpp role defaults
+      ansible.builtin.include_role:
+        name: llamacpp
+        tasks_from: _load_defaults.yml
+        public: true
+
+    - name: Load chatbot role defaults
+      ansible.builtin.include_role:
+        name: chatbot
+        tasks_from: _load_defaults.yml
+        public: true
+
+    - name: Load fortiaigate role defaults
+      ansible.builtin.include_role:
+        name: fortiaigate
+        tasks_from: _load_defaults.yml
+        public: true
+
+    - name: Verify k3s kubeconfig is present
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: kubeconfig_stat
+
+    - name: Fail if kubeconfig is missing and a k8s teardown is requested
+      ansible.builtin.fail:
+        msg: >-
+          k3s kubeconfig not found at {{ kubeconfig_path }} — this teardown
+          assumes k3s is still running. To remove FAIG staging files only when
+          k3s is already gone, run with --tags faig (which doesn't touch k8s).
+      when:
+        - not kubeconfig_stat.stat.exists
+        - (ansible_run_tags | intersect(['all', 'apps', 'llamacpp', 'chatbot'])) | length > 0
+
+  tasks:
+    # =========================================================================
+    # llama.cpp
+    # =========================================================================
+    - name: Tear down llama.cpp
+      tags: [apps, llamacpp]
+      block:
+        - name: Delete llama.cpp Deployment
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: apps/v1
+            kind: Deployment
+            namespace: "{{ llamacpp_namespace }}"
+            name: llamacpp
+            wait: true
+            wait_timeout: 120
+
+        - name: Delete llama.cpp Ingress
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: networking.k8s.io/v1
+            kind: Ingress
+            namespace: "{{ llamacpp_namespace }}"
+            name: llamacpp
+
+        - name: Delete llama.cpp Service
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: v1
+            kind: Service
+            namespace: "{{ llamacpp_namespace }}"
+            name: llamacpp
+
+        # Order matters: delete the PVC before the PV so the PV unbinds cleanly.
+        # With reclaimPolicy=Retain the PV stays "Released" after PVC delete and
+        # we then remove it explicitly so the next install can recreate it.
+        - name: Delete llama.cpp PVC
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: v1
+            kind: PersistentVolumeClaim
+            namespace: "{{ llamacpp_namespace }}"
+            name: "{{ llamacpp_pvc_name }}"
+            wait: true
+            wait_timeout: 60
+
+        - name: Delete llama.cpp PV (hostPath data on /var/lib/llamacpp is preserved)
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: v1
+            kind: PersistentVolume
+            name: "{{ llamacpp_pv_name }}"
+            wait: true
+            wait_timeout: 60
+
+        - name: Delete llama.cpp namespace (cascades any leftovers)
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: v1
+            kind: Namespace
+            name: "{{ llamacpp_namespace }}"
+            wait: true
+            wait_timeout: 120
+
+        - name: Confirm llama.cpp teardown
+          ansible.builtin.debug:
+            msg:
+              - "llama.cpp removed. Model file on disk preserved at {{ llamacpp_hostpath_dir }}."
+              - "Re-install will reuse it. To wipe: rm -rf {{ llamacpp_hostpath_dir }}/*"
+
+    # =========================================================================
+    # Chatbot
+    # =========================================================================
+    - name: Tear down chatbot
+      tags: [apps, chatbot]
+      block:
+        # Deleting the namespace cascades Deployment, Service, Ingress, Secret,
+        # ConfigMap. Built image in containerd and source in /opt/ansible-chatbot
+        # are intentionally preserved (rebuildable, but harmless to keep).
+        - name: Delete chatbot namespace
+          kubernetes.core.k8s:
+            kubeconfig: "{{ kubeconfig_path }}"
+            state: absent
+            api_version: v1
+            kind: Namespace
+            name: "{{ chatbot_namespace }}"
+            wait: true
+            wait_timeout: 120
+
+        - name: Confirm chatbot teardown
+          ansible.builtin.debug:
+            msg:
+              - "Chatbot removed. Build dir {{ chatbot_build_dir }} and containerd image preserved."
+              - "To free those: rm -rf {{ chatbot_build_dir }} && k3s ctr images rm <ref>"
+
+    # =========================================================================
+    # FortiAIGate staging files
+    # =========================================================================
+    - name: Tear down FAIG staging
+      tags: [apps, faig]
+      block:
+        - name: Resolve SSH user's home directory
+          ansible.builtin.set_fact:
+            faig_user_home: "/home/{{ ansible_user }}"
+
+        - name: Remove ~/{{ faig_extracted_dir }}
+          ansible.builtin.file:
+            path: "{{ faig_user_home }}/{{ faig_extracted_dir }}"
+            state: absent
+
+        - name: Remove ~/{{ faig_my_values_filename }}
+          ansible.builtin.file:
+            path: "{{ faig_user_home }}/{{ faig_my_values_filename }}"
+            state: absent
+
+        # Belt-and-suspenders: if a prior run died between upload and cleanup,
+        # the tar may still be sitting in the home dir.
+        - name: Remove stray FAIG tar in user's home (if any)
+          ansible.builtin.file:
+            path: "{{ faig_user_home }}/{{ faig_tar_name }}"
+            state: absent
+
+        - name: Confirm FAIG teardown
+          ansible.builtin.debug:
+            msg: "FAIG staging removed from {{ faig_user_home }}. ./licenses/ on the controller untouched."

@@ -1,0 +1,122 @@
+---
+# Install cert-manager and issue a Let's Encrypt certificate for this host's
+# DNS name via Google Cloud DNS (DNS-01). The issued cert is written into the
+# shared `ingress-default-tls` Secret that ingress-nginx already uses as its
+# default-ssl-certificate, replacing the self-signed cert the ingress-nginx
+# role created - so the UI/chatbot present a publicly-trusted cert.
+#
+# DNS-01 is required here (not HTTP-01): the VM is reachable on 443 only from
+# allowlisted CIDRs, so Let's Encrypt's own validation servers cannot reach it.
+# DNS-01 only needs the ability to write a TXT record in the delegated zone.
+
+- name: Ensure cert-manager namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ cert_manager_namespace }}"
+  when: cert_manager_enabled | default(true) | bool
+
+- name: Add cert-manager Helm repo
+  kubernetes.core.helm_repository:
+    name: jetstack
+    repo_url: https://charts.jetstack.io
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  when: cert_manager_enabled | default(true) | bool
+
+- name: Install cert-manager
+  kubernetes.core.helm:
+    name: cert-manager
+    chart_ref: jetstack/cert-manager
+    chart_version: "{{ cert_manager_chart_version }}"
+    release_namespace: "{{ cert_manager_namespace }}"
+    create_namespace: false
+    set_values:
+      - value: installCRDs=true
+    wait: true
+    wait_timeout: 5m
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  when: cert_manager_enabled | default(true) | bool
+
+- name: Wait for cert-manager webhook to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: certificaterequests.cert-manager.io
+  register: cm_crd
+  retries: 30
+  delay: 5
+  until: cm_crd.resources | length > 0
+  when: cert_manager_enabled | default(true) | bool
+
+- name: Fail if ACME email is not set
+  ansible.builtin.fail:
+    msg: "cert_manager_email must be set to issue a Let's Encrypt cert (TOS consent)"
+  when:
+    - cert_manager_cert_hostname | default('') | length > 0
+    - cert_manager_email | default('') | length == 0
+
+- name: Fail if DNS project is not set
+  ansible.builtin.fail:
+    msg: "cert_manager_dns_project must be set for the Google Cloud DNS solver (cert-manager auto-discovers the zone)"
+  when:
+    - cert_manager_cert_hostname | default('') | length > 0
+    - cert_manager_dns_project | default('') | length == 0
+
+- name: Build Google Cloud DNS solver config (optional keys omitted when unset)
+  ansible.builtin.set_fact:
+    cert_manager_clouddns: >-
+      {%- set s = {'project': cert_manager_dns_project} -%}
+      {%- if cert_manager_dns_zone | default('') | length > 0 -%}
+        {%- set _ = s.update({'hostedZoneName': cert_manager_dns_zone}) -%}
+      {%- endif -%}
+      {%- if cert_manager_dns_sa_secret | default('') | length > 0 -%}
+        {%- set _ = s.update({'serviceAccountSecretRef': {'name': cert_manager_dns_sa_secret, 'key': cert_manager_dns_sa_key}}) -%}
+      {%- endif -%}
+      {{ s }}
+  when: cert_manager_cert_hostname | default('') | length > 0
+
+- name: Apply DNS-01 ClusterIssuer
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: "{{ cert_manager_issuer_kind }}"
+      metadata:
+        name: "{{ cert_manager_issuer_name }}"
+      spec:
+        acme:
+          server: "{{ cert_manager_acme_server }}"
+          email: "{{ cert_manager_email }}"
+          privateKeySecretRef:
+            name: "{{ cert_manager_issuer_name }}-account-key"
+          solvers:
+            - dns01:
+                cloudDNS: "{{ cert_manager_clouddns }}"
+  when: cert_manager_cert_hostname | default('') | length > 0
+
+- name: Apply Certificate for this hostname
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: Certificate
+      metadata:
+        name: "faig-{{ cert_manager_cert_hostname | regex_replace('[^a-zA-Z0-9-]', '-') }}"
+        namespace: "{{ cert_manager_target_namespace }}"
+      spec:
+        secretName: "{{ cert_manager_target_secret }}"
+        issuerRef:
+          name: "{{ cert_manager_issuer_name }}"
+          kind: "{{ cert_manager_issuer_kind }}"
+        dnsNames:
+          - "{{ cert_manager_cert_hostname }}"
+  when: cert_manager_cert_hostname | default('') | length > 0

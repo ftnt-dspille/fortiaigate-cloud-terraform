@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llamacpp
+  namespace: {{ llamacpp_namespace }}
+  annotations:
+    # Strip the external path prefix before proxying to llama-server, which
+    # serves its API at the root (/v1/..., /health). The capture group in
+    # `path` below feeds this rewrite-target.
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    # Long generations and large prompts need generous timeouts and body size.
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: {{ llamacpp_ingress_class }}
+  rules:
+    # No host: matches any Host header (hostname, raw IP, anything).
+    - http:
+        paths:
+          - path: {{ llamacpp_ingress_path }}(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: llamacpp
+                port:
+                  number: {{ llamacpp_service_port }}

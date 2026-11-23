@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ chatbot_release_name }}-config
+  namespace: {{ chatbot_namespace }}
+data:
+  LLM_ENDPOINT: "{{ chatbot_llm_endpoint }}"
+  LLM_MODEL: "{{ chatbot_llm_model }}"
+  LLM_TLS_VERIFY: "{{ chatbot_llm_tls_verify | string }}"
+  AWS_REGION: "{{ chatbot_aws_region }}"

@@ -1,0 +1,46 @@
+# Managed by Ansible
+controller:
+  kind: DaemonSet
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+
+  # Run on the single node only (hostNetwork would conflict if scaled out anyway)
+  nodeSelector:
+    kubernetes.io/os: linux
+
+  # No external LB / NodePort needed - hostNetwork puts us directly on the
+  # primary interface at 80/443
+  service:
+    enabled: false
+
+  # Wire in the shared self-signed cert as the controller's default-ssl-certificate.
+  # Any Ingress without its own tls: block falls back to this — so /llm, /chat,
+  # and any future paths get HTTPS for free.
+  extraArgs:
+    default-ssl-certificate: "{{ ingress_default_tls_namespace }}/{{ ingress_default_tls_secret }}"
+
+  # Useful when behind DNAT/another proxy: log the real client IP
+  config:
+    use-forwarded-headers: "true"
+    compute-full-forwarded-for: "true"
+    use-proxy-protocol: "false"
+
+  # Make the controller the default for IngressClass-less Ingress resources
+  ingressClassResource:
+    name: nginx
+    enabled: true
+    default: true
+
+  # Watch all namespaces (default is fine for single-node test)
+  watchIngressWithoutClass: true
+
+  # Resource limits modest enough for a small test node
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+  admissionWebhooks:
+    enabled: true

@@ -1,0 +1,115 @@
+---
+# Unified deployment for the GPU server stack on a single-node k3s cluster.
+#
+# Roles, in order:
+#   1. nfs               - host-side NFS export consumed by the dynamic provisioner
+#   2. k3s               - install k3s with Traefik/ServiceLB disabled, DNAT-aware TLS
+#   3. gpu               - (optional, gpu_enabled=true) NVIDIA driver + Container Toolkit + device plugin
+#   4. helm              - install Helm 3 + python-kubernetes for kubernetes.core modules
+#   5. ingress-nginx     - DaemonSet on hostNetwork, default-ssl-certificate wired in
+#   6. cert-manager       - (optional) Let's Encrypt via Cloud DNS, issues into the ingress default TLS secret
+#   7. nfs-provisioner   - Helm release providing the `nfs-client` StorageClass (default)
+#   8. llamacpp          - llama.cpp llama-server Deployment, ingress at {{ llamacpp_ingress_path }}
+#   9. chatbot           - build local image, import into containerd, deploy + ingress at /chat
+#   10. fortiaigate       - stage FAIG helm chart tar + licenses + my-values.yaml in user's home
+#
+# Selective runs:
+#   ansible-playbook ... --tags base       # everything except apps
+#   ansible-playbook ... --tags apps       # llamacpp + chatbot + faig staging
+#   ansible-playbook ... --tags llamacpp   # llama.cpp only
+#   ansible-playbook ... --tags chatbot    # rebuild + redeploy chatbot only
+#   ansible-playbook ... --tags faig       # FAIG staging only
+#   ansible-playbook ... --tags ingress    # reapply ingress-nginx only
+#   ansible-playbook ... --tags certmanager  # issue/renew Let's Encrypt cert only
+#
+# DNAT vs non-DNAT:
+#   Set `external_address` in inventory to the public/DNAT'd IP (or hostname) used
+#   to reach the cluster from outside. Leave it empty in non-DNAT environments -
+#   the pre_task below defaults it to the primary interface IP automatically.
+
+# ── upstream adaptation (vendored from evoke/fortiaigate-demo-ansible-playbook) ──
+# Vendored from evoke/fortiaigate-demo-ansible-playbook @ 9c511d4 (main,
+# 2026-06-03). Two changes from upstream so this playbook runs BOTH as a
+# Fabric Studio pod's `config: playbook:` phase (which executes
+# `ansible-playbook <play> --limit <node>` against the node's SSH port-forward
+# with extra-vars fsh_pod_host / fsh_node / fsh_public_origin) AND against a
+# cloud VM (see gcp/scripts/build.sh, azure/scripts/build.sh, which generate a
+# one-host inventory with explicit primary_interface / external_address):
+#   1. hosts: k3s_node → hosts: all   (the caller limits to the single node)
+#   2. external_address defaults to the pod host (fsh_pod_host) for pod deploys
+#      - that's how the browser reaches the app through the FS HTTPS proxy, so
+#      it's the right k3s TLS SAN + ingress cert CN. Cloud inventories set
+#      external_address explicitly (the VM's IP). primary_interface defaults to
+#      the FAIG qcow NIC (set faig_primary_interface to override; confirm with
+#      `ip -br a`).
+# Keep this file in sync with upstream on chart/role bumps - see faig_seed/README
+# (the upstream sha is the drift anchor).
+- name: Deploy unified GPU server stack on k3s
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # FS-phase wiring: the browser reaches the app at https://<pod>:(13000+idx)
+    # through the FS HTTPS proxy, so external_address = the pod host.
+    external_address: "{{ fsh_pod_host | default('') }}"
+    # The FAIG qcow's management NIC. Override per-image with faig_primary_interface.
+    primary_interface: "{{ faig_primary_interface | default('ens3') }}"
+
+  pre_tasks:
+    - name: Verify primary interface exists
+      ansible.builtin.fail:
+        msg: "Primary interface {{ primary_interface }} not found on this host"
+      when: primary_interface not in ansible_interfaces
+
+    - name: Capture primary interface IPv4 address
+      ansible.builtin.set_fact:
+        primary_iface_ip: "{{ hostvars[inventory_hostname]['ansible_' + primary_interface]['ipv4']['address'] }}"
+
+    - name: Default external_address to primary_iface_ip when unset (non-DNAT envs)
+      ansible.builtin.set_fact:
+        external_address: "{{ primary_iface_ip }}"
+      when: external_address | default('') | length == 0
+
+    - name: Show resolved facts
+      ansible.builtin.debug:
+        msg:
+          - "Primary interface: {{ primary_interface }} ({{ primary_iface_ip }})"
+          - "External address:  {{ external_address }}"
+
+    - name: Ensure /etc/hosts contains required static entries
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ item.name | regex_escape }}(\s|$)'
+        line: "{{ item.ip }} {{ item.name }}"
+        state: present
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ extra_hosts | default([]) }}"
+      loop_control:
+        label: "{{ item.ip }} {{ item.name }}"
+      tags: [hosts]
+
+  roles:
+    - role: nfs
+      tags: [base, nfs]
+    - role: k3s
+      tags: [base, k3s]
+    - role: gpu
+      tags: [base, gpu]
+      when: gpu_enabled | bool
+    - role: helm
+      tags: [base, helm]
+    - role: ingress-nginx
+      tags: [base, ingress]
+    - role: cert-manager
+      tags: [base, certmanager]
+    - role: nfs-provisioner
+      tags: [base, storage]
+    - role: llamacpp
+      tags: [apps, llamacpp]
+    - role: chatbot
+      tags: [apps, chatbot]
+    - role: fortiaigate
+      tags: [apps, faig]

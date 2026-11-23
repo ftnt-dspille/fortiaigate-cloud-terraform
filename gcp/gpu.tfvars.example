@@ -1,0 +1,18 @@
+# GPU lab profile -- layer on top of terraform.tfvars (which is the CPU BUILD
+# profile, used only to build the base image). Copy to gpu.tfvars (gitignored)
+# and use the Makefile's GPU targets (`make apply-gpu`, `make deploy`), which
+# pass -var-file=gpu.tfvars. Applying WITHOUT it against a GPU VM replaces the VM
+# (machine type, accelerator, boot image and disk type all differ).
+machine_type = "g2-standard-8" # NVIDIA L4; a T4 (compute 7.5) cannot run 8.0.2's policyguard model
+gpu_type     = "nvidia-l4"
+gpu_count    = 1
+disk_type    = "pd-ssd"
+source_image = "projects/<your-project>/global/images/<faig-build-image>"
+
+# Who may reach FAIG on 443: one /32 per student pod (a pod's workstations egress
+# on its hostname's A record) plus the instructor. Generate the pod lines from the
+# class roster with `make faig-class-allowlist`.
+public_access_cidrs = [
+  "203.0.113.10/32", # student01 pod
+  "198.51.100.20/32", # instructor
+]

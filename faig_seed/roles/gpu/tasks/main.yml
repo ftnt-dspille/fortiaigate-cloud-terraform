@@ -1,0 +1,141 @@
+---
+# Host-side NVIDIA enablement for k3s. Runs only when gpu_enabled is true.
+#
+# Order matters:
+#   1. Install minimal prereqs (pciutils etc.) — must precede the lspci check,
+#      because some Ubuntu Server images don't ship pciutils by default
+#   2. Add NVIDIA's CUDA apt/dnf repo (always, idempotent) — so nvidia-utils-*
+#      and cuda-drivers-* package names are resolvable regardless of whether
+#      we ultimately install them
+#   3. Confirm an NVIDIA GPU is present on the PCI bus — fail fast otherwise
+#   4. Install nvidia-utils-<branch> (ships /usr/bin/nvidia-smi) — runs BEFORE
+#      the driver pre-check so the pre-check becomes a true "is the kernel
+#      module loaded?" test, not a confused "does the binary exist AND does
+#      the module work?" test. nvidia-smi and the kernel driver are
+#      independent packages — we treat them as independent here.
+#   5. Pre-check: does `nvidia-smi` succeed? If yes, the kernel module is
+#      loaded and we skip the heavy driver install.
+#   6. Install cuda-drivers-<branch> (kernel module + full userspace) when
+#      the pre-check failed.
+#   7. Re-check; bail with a "reboot needed" message if `nvidia-smi` still
+#      can't talk to the driver.
+#   8. Install the NVIDIA Container Toolkit (containerd runtime integration)
+#   9. Restart k3s so containerd reloads and auto-detects the nvidia runtime
+#  10. Apply the NVIDIA k8s-device-plugin DaemonSet
+#  11. Validate the node now advertises nvidia.com/gpu
+
+- name: Install gpu-role prerequisites (pciutils etc.)
+  ansible.builtin.include_tasks: prereqs.yml
+
+- name: Add NVIDIA CUDA repo (Debian/Ubuntu)
+  ansible.builtin.include_tasks: repo-debian.yml
+  when: ansible_os_family == "Debian"
+
+- name: Add NVIDIA CUDA repo (RHEL family)
+  ansible.builtin.include_tasks: repo-redhat.yml
+  when: ansible_os_family == "RedHat"
+
+- name: Detect NVIDIA GPU on the PCI bus
+  # Match `NVIDIA` anywhere on a line — covers every device class string
+  # (VGA, 3D, Display, Audio aux devices, etc.). We only care that at least
+  # one NVIDIA device is visible.
+  ansible.builtin.shell: |
+    set -o pipefail
+    lspci -nn | grep -i 'NVIDIA' || true
+  args:
+    executable: /bin/bash
+  register: gpu_lspci
+  changed_when: false
+  failed_when: false
+
+- name: Fail if gpu_enabled but no NVIDIA GPU is visible
+  ansible.builtin.fail:
+    msg: >-
+      gpu_enabled is true but no NVIDIA device was found via `lspci` on
+      {{ inventory_hostname }}.
+      If this host is a VM, verify GPU passthrough is configured on the
+      hypervisor (the GPU must appear in `lspci` from inside the VM).
+      If physical, verify the GPU is seated and the host is not claiming it
+      via a non-NVIDIA driver.
+      Set gpu_enabled=false to skip GPU enablement entirely.
+  when: gpu_lspci.stdout | trim | length == 0
+
+- name: Show detected NVIDIA hardware
+  ansible.builtin.debug:
+    msg: "NVIDIA hardware detected: {{ gpu_lspci.stdout_lines }}"
+
+# Install nvidia-utils-<branch> (provides /usr/bin/nvidia-smi) BEFORE the
+# driver pre-check. nvidia-utils is a pure userspace package — installing it
+# does NOT pull or load the kernel module, so this is safe even when no
+# driver is present yet. It also means the pre-check below tests what we
+# actually care about: whether the kernel module is loaded and working.
+- name: Ensure nvidia-smi (nvidia-utils) is installed
+  ansible.builtin.include_tasks: nvidia-smi.yml
+
+- name: Check whether the NVIDIA kernel driver is loaded
+  # `nvidia-smi` returns 0 only when the kernel module is loaded AND can talk
+  # to the GPU. With nvidia-utils guaranteed by the previous task, a non-zero
+  # rc here unambiguously means "kernel driver not functional".
+  ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+  register: nvidia_smi_pre
+  changed_when: false
+  failed_when: false
+
+- name: Show pre-existing driver state
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Working driver detected — skipping driver install: '
+         ~ (nvidia_smi_pre.stdout | replace('\n', ' | '))
+         if nvidia_smi_pre.rc == 0
+         else 'Kernel driver not functional — will install cuda-drivers-' ~ nvidia_driver_branch }}
+
+- name: Install NVIDIA driver (Debian/Ubuntu)
+  ansible.builtin.include_tasks: driver-debian.yml
+  when:
+    - nvidia_smi_pre.rc != 0
+    - ansible_os_family == "Debian"
+
+- name: Install NVIDIA driver (RHEL family)
+  ansible.builtin.include_tasks: driver-redhat.yml
+  when:
+    - nvidia_smi_pre.rc != 0
+    - ansible_os_family == "RedHat"
+
+- name: Re-check nvidia-smi after driver install
+  ansible.builtin.command: nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+  register: nvidia_smi_post
+  changed_when: false
+  failed_when: false
+
+- name: Fail if driver still not functional (kernel module not loaded)
+  ansible.builtin.fail:
+    msg: >-
+      NVIDIA driver packages are installed but `nvidia-smi` still returns
+      rc={{ nvidia_smi_post.rc }} (stderr: {{ nvidia_smi_post.stderr | default('') }}).
+      The host almost certainly needs a REBOOT for the kernel module to load.
+      After rebooting, re-run this playbook — it's idempotent.
+      If Secure Boot is enabled, you may need to enroll the NVIDIA MOK first.
+      Set gpu_allow_driver_failure=true to bypass this check temporarily.
+  when:
+    - nvidia_smi_post.rc != 0
+    - not (gpu_allow_driver_failure | bool)
+
+- name: Continuing despite non-functional driver (gpu_allow_driver_failure=true)
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: nvidia-smi is not working but gpu_allow_driver_failure=true.
+      The toolkit + device plugin will be installed but GPU workloads will
+      fail to schedule until the driver loads (usually after a reboot).
+  when:
+    - nvidia_smi_post.rc != 0
+    - gpu_allow_driver_failure | bool
+
+- name: Install NVIDIA Container Toolkit
+  ansible.builtin.include_tasks: toolkit.yml
+
+- name: Apply NVIDIA k8s-device-plugin DaemonSet
+  ansible.builtin.include_tasks: device-plugin.yml
+
+- name: Validate node now advertises nvidia.com/gpu
+  ansible.builtin.include_tasks: validate.yml
+  when: nvidia_smi_post.rc == 0

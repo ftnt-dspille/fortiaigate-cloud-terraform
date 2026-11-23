@@ -1,0 +1,212 @@
+---
+# Install ingress-nginx via Helm, configured to run as a DaemonSet on hostNetwork
+# with a single self-signed TLS cert wired in as the default-ssl-certificate.
+#
+# Why hostNetwork?
+# - The cluster has a single node and ServiceLB is disabled.
+# - hostNetwork makes nginx bind directly on the host's primary interface IP at
+#   ports 80/443, so DNAT'd traffic reaches it without a LoadBalancer/NodePort hop.
+# - We use a nodeSelector pinned to linux nodes and dnsPolicy: ClusterFirstWithHostNet
+#   so DNS still resolves cluster services from inside the controller pod.
+#
+# Why a shared default TLS secret?
+# - Per-Ingress TLS blocks would force every app's role to manage certs.
+# - Wiring one self-signed cert into the controller's --default-ssl-certificate
+#   means any Ingress (with or without its own tls: block) gets HTTPS for free.
+
+# ---------------------------------------------------------------------------
+# Generate the self-signed default TLS material on the node.
+# ---------------------------------------------------------------------------
+
+- name: Ensure ingress TLS staging directory exists
+  ansible.builtin.file:
+    path: "{{ ingress_default_tls_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Generate private key for default ingress TLS
+  community.crypto.openssl_privatekey:
+    path: "{{ ingress_default_tls_dir }}/tls.key"
+    size: 2048
+    type: RSA
+    mode: "0600"
+
+- name: Build ingress TLS SAN list (deduplicated)
+  ansible.builtin.set_fact:
+    ingress_default_tls_sans: >-
+      {{
+        ([primary_iface_ip, external_address] + (extra_tls_sans | default([])))
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+
+- name: Compute SAN entries with IP and DNS prefixes
+  # Anything that looks like an IPv4 literal becomes an IP SAN; everything else
+  # (FQDNs, hostnames) becomes a DNS SAN. Keeps the role usable for both DNAT'd
+  # IP-only environments and named-host setups.
+  ansible.builtin.set_fact:
+    ingress_default_tls_san_entries: >-
+      {%- set out = [] -%}
+      {%- for s in ingress_default_tls_sans -%}
+        {%- if s is match('^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') -%}
+        {%- set _ = out.append('IP:' + s) -%}
+        {%- else -%}
+        {%- set _ = out.append('DNS:' + s) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Generate CSR for default ingress TLS
+  community.crypto.openssl_csr:
+    path: "{{ ingress_default_tls_dir }}/tls.csr"
+    privatekey_path: "{{ ingress_default_tls_dir }}/tls.key"
+    common_name: "{{ ingress_default_tls_cn }}"
+    subject_alt_name: "{{ ingress_default_tls_san_entries }}"
+    mode: "0600"
+
+- name: Generate self-signed certificate for default ingress TLS
+  community.crypto.x509_certificate:
+    path: "{{ ingress_default_tls_dir }}/tls.crt"
+    privatekey_path: "{{ ingress_default_tls_dir }}/tls.key"
+    csr_path: "{{ ingress_default_tls_dir }}/tls.csr"
+    provider: selfsigned
+    selfsigned_not_after: "+{{ ingress_default_tls_validity_days }}d"
+    mode: "0644"
+
+- name: Read TLS cert + key for Secret
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  register: ingress_tls_files
+  loop:
+    - "{{ ingress_default_tls_dir }}/tls.crt"
+    - "{{ ingress_default_tls_dir }}/tls.key"
+
+# ---------------------------------------------------------------------------
+# Apply the namespace + Secret BEFORE the Helm install so the controller can
+# reference the secret on first boot via --default-ssl-certificate.
+# ---------------------------------------------------------------------------
+
+- name: Ensure ingress-nginx namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ingress_default_tls_namespace }}"
+
+- name: Apply default TLS Secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: kubernetes.io/tls
+      metadata:
+        name: "{{ ingress_default_tls_secret }}"
+        namespace: "{{ ingress_default_tls_namespace }}"
+      data:
+        tls.crt: "{{ ingress_tls_files.results[0].content }}"
+        tls.key: "{{ ingress_tls_files.results[1].content }}"
+
+# ---------------------------------------------------------------------------
+# Install / upgrade the controller.
+# ---------------------------------------------------------------------------
+
+- name: Add ingress-nginx Helm repo
+  kubernetes.core.helm_repository:
+    name: ingress-nginx
+    repo_url: https://kubernetes.github.io/ingress-nginx
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Render ingress-nginx values file
+  ansible.builtin.template:
+    src: ingress-nginx-values.yaml.j2
+    dest: /etc/rancher/k3s/ingress-nginx-values.yaml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install/upgrade ingress-nginx
+  kubernetes.core.helm:
+    name: ingress-nginx
+    chart_ref: ingress-nginx/ingress-nginx
+    chart_version: "{{ ingress_nginx_chart_version }}"
+    release_namespace: "{{ ingress_default_tls_namespace }}"
+    create_namespace: false
+    values_files:
+      - /etc/rancher/k3s/ingress-nginx-values.yaml
+    wait: true
+    wait_timeout: 5m
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+- name: Wait for ingress-nginx DaemonSet to become ready
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: DaemonSet
+    namespace: "{{ ingress_default_tls_namespace }}"
+    name: ingress-nginx-controller
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: ingress_ds
+  retries: 30
+  delay: 10
+  until:
+    - ingress_ds.resources | length > 0
+    - ingress_ds.resources[0].status.desiredNumberScheduled | default(0) | int >= 1
+    - (ingress_ds.resources[0].status.numberReady | default(0) | int)
+      == (ingress_ds.resources[0].status.desiredNumberScheduled | default(0) | int)
+  failed_when: false
+
+- name: Collect ingress-nginx pod state on readiness failure
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ ingress_default_tls_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/component=controller
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: ingress_pods
+  when: >-
+    ingress_ds.resources | length == 0
+    or (ingress_ds.resources[0].status.numberReady | default(0) | int)
+       != (ingress_ds.resources[0].status.desiredNumberScheduled | default(0) | int)
+    or (ingress_ds.resources[0].status.desiredNumberScheduled | default(0) | int) < 1
+
+- name: Fail with diagnostic if ingress-nginx never became ready
+  ansible.builtin.fail:
+    msg: |-
+      ingress-nginx controller DaemonSet did not become ready.
+      DaemonSet status: {{ ingress_ds.resources[0].status | default({}) | to_nice_yaml }}
+      Pod statuses:
+      {% for p in ingress_pods.resources | default([]) %}
+        - {{ p.metadata.name }}: phase={{ p.status.phase | default('?') }}
+          containers:
+      {% for cs in p.status.containerStatuses | default([]) %}
+            - {{ cs.name }}: ready={{ cs.ready }} restarts={{ cs.restartCount }}
+              state={{ cs.state | to_json }}
+              lastState={{ cs.lastState | to_json }}
+      {% endfor %}
+      {% endfor %}
+  when: >-
+    ingress_ds.resources | length == 0
+    or (ingress_ds.resources[0].status.numberReady | default(0) | int)
+       != (ingress_ds.resources[0].status.desiredNumberScheduled | default(0) | int)
+    or (ingress_ds.resources[0].status.desiredNumberScheduled | default(0) | int) < 1
+
+- name: Confirm ingress controller is reachable on host ports
+  ansible.builtin.wait_for:
+    host: "{{ primary_iface_ip }}"
+    port: "{{ item }}"
+    timeout: 60
+  loop:
+    - 80
+    - 443

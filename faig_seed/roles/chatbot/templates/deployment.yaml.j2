@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ chatbot_release_name }}
+  namespace: {{ chatbot_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ chatbot_release_name }}
+spec:
+  replicas: {{ chatbot_replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ chatbot_release_name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ chatbot_release_name }}
+      annotations:
+        # Roll the pod when the image hash changes (idempotent on re-runs).
+        chatbot/image-tag: "{{ chatbot_image_tag }}"
+    spec:
+      containers:
+        - name: chatbot
+          image: {{ chatbot_image_ref }}
+          # Image is pre-imported into containerd; never try to pull from a registry.
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8501
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ chatbot_release_name }}-config
+            - secretRef:
+                name: {{ chatbot_release_name }}-secrets
+          readinessProbe:
+            httpGet:
+              path: {{ chatbot_ingress_path }}/_stcore/health
+              port: 8501
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: {{ chatbot_ingress_path }}/_stcore/health
+              port: 8501
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

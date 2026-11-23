@@ -1,0 +1,66 @@
+---
+# NVIDIA k8s-device-plugin — a DaemonSet that talks to the nvidia container
+# runtime via the device-plugin gRPC API and registers `nvidia.com/gpu` as a
+# schedulable resource on every node where it's running.
+#
+# Two pieces are needed for k3s + NVIDIA Container Toolkit:
+#   1. A `nvidia` RuntimeClass — handler matches the containerd runtime name
+#      that k3s auto-registers when the toolkit is present
+#   2. The DaemonSet must declare `runtimeClassName: nvidia` — otherwise it
+#      runs under the default runc runtime, NVML can't initialize, and the
+#      plugin logs "No devices found" forever. NVIDIA's static manifest
+#      doesn't set runtimeClassName, so we apply it then patch it.
+
+- name: Apply RuntimeClass nvidia
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'nvidia-runtimeclass.yaml.j2') | from_yaml }}"
+
+- name: Stage NVIDIA device plugin manifest
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/{{ nvidia_device_plugin_version }}/deployments/static/nvidia-device-plugin.yml"
+    dest: "/tmp/nvidia-device-plugin-{{ nvidia_device_plugin_version }}.yml"
+    mode: "0644"
+    force: true
+
+- name: Apply NVIDIA device plugin DaemonSet
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    src: "/tmp/nvidia-device-plugin-{{ nvidia_device_plugin_version }}.yml"
+
+# Explicit JSON patch — adds spec.template.spec.runtimeClassName=nvidia.
+# Using k8s_json_patch instead of a partial kubernetes.core.k8s apply because
+# the latter would try to reconcile the whole resource; this is a surgical
+# single-field add. The DaemonSet controller sees the template change and
+# triggers a rolling pod restart, so the new pod inherits the nvidia runtime.
+- name: Patch DaemonSet to use runtimeClassName=nvidia
+  kubernetes.core.k8s_json_patch:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: apps/v1
+    kind: DaemonSet
+    namespace: kube-system
+    name: nvidia-device-plugin-daemonset
+    patch:
+      - op: add
+        path: /spec/template/spec/runtimeClassName
+        value: nvidia
+
+- name: Wait for nvidia-device-plugin DaemonSet to become Available
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: apps/v1
+    kind: DaemonSet
+    namespace: kube-system
+    name: nvidia-device-plugin-daemonset
+  register: nvdp_ds
+  retries: 30
+  delay: 10
+  until:
+    - nvdp_ds.resources | length > 0
+    - (nvdp_ds.resources[0].status.numberReady | default(0)) >= 1
+    - (nvdp_ds.resources[0].status.numberReady | default(0)) ==
+      (nvdp_ds.resources[0].status.desiredNumberScheduled | default(0))
+    - (nvdp_ds.resources[0].status.updatedNumberScheduled | default(0)) ==
+      (nvdp_ds.resources[0].status.desiredNumberScheduled | default(0))

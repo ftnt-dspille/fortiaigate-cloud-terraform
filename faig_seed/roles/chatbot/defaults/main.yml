@@ -1,0 +1,40 @@
+---
+# Role defaults — precedence rank #2. Override per-host in inventory/hosts.yml.
+
+chatbot_namespace: chatbot
+chatbot_release_name: chatbot
+chatbot_replicas: 1
+chatbot_service_port: 8501
+
+chatbot_ingress_enabled: true
+chatbot_ingress_class: nginx
+chatbot_ingress_path: /chat
+
+# Where the source lives on the controller and where it gets staged on the node.
+chatbot_source_dir: "{{ playbook_dir }}/files/chatbot-src"
+chatbot_build_dir: /opt/ansible-chatbot/build
+chatbot_image_repo: ansible-chatbot
+
+# LLM wiring — defaults to in-cluster llama.cpp; override per-environment.
+# References llamacpp_* variables defined in roles/llamacpp/defaults/main.yml.
+# Cross-role refs resolve at evaluation time because all role defaults are
+# loaded play-wide before any role's tasks run.
+chatbot_llm_endpoint: "http://llamacpp.{{ llamacpp_namespace }}.svc.cluster.local:{{ llamacpp_service_port }}/v1"
+chatbot_llm_model: "{{ llamacpp_model_alias }}"
+chatbot_llm_tls_verify: "false"
+chatbot_aws_region: ca-central-1
+chatbot_bedrock_kb_id: ""
+chatbot_bedrock_model_id: ""
+
+# Secrets — pulled from controller env so they never appear in the inventory.
+# Override with -e or ansible-vault as needed.
+#
+# Precedence:
+#   1. LLM_API_KEY on the controller — wins for external providers (OpenAI,
+#      Azure, FortiAIGate) where a real key is required.
+#   2. llamacpp_api_key — used when --api-key enforcement is enabled on
+#      llama-server, so the chatbot Bearer-auths with the same value.
+#   3. Sentinel "sk-no-key-required" — needed because the OpenAI Python SDK
+#      rejects api_key="" before sending any request, even though llama.cpp
+#      itself doesn't validate. Harmless because the server ignores it.
+chatbot_llm_api_key: "{{ lookup('env', 'LLM_API_KEY') | default(llamacpp_api_key, true) | default('sk-no-key-required', true) }}"

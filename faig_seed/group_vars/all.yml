@@ -1,0 +1,61 @@
+---
+# ============================================================================
+# Shared variables for the unified GPU server stack.
+# ============================================================================
+#
+# Almost every variable for this stack now lives in its role's
+# `defaults/main.yml` rather than here. Reason: Ansible variable precedence
+# puts playbook group_vars/all (rank #5) ABOVE inventory's `vars:` block
+# (rank #3). Putting defaults in group_vars/all silently overrides per-host
+# inventory values. Role defaults (rank #2) sit below inventory, so
+# inventory overrides actually win.
+#
+# Where to find each variable:
+#
+#   gpu_enabled, nvidia_driver_branch, nvidia_device_plugin_version,
+#   gpu_allow_driver_failure
+#     → roles/gpu/defaults/main.yml
+#
+#   k3s_version, cluster_cidr, service_cidr, cluster_dns, flannel_backend
+#     → roles/k3s/defaults/main.yml
+#
+#   nfs_export_path, nfs_export_size_gb, nfs_allowed_cidr
+#     → roles/nfs/defaults/main.yml
+#
+#   ingress_nginx_chart_version, ingress_default_tls_*
+#     → roles/ingress-nginx/defaults/main.yml
+#
+#   nfs_provisioner_chart_version
+#     → roles/nfs-provisioner/defaults/main.yml
+#
+#   llamacpp_*  (~40 vars: namespace, image, model URL, ctx_size, threads,
+#               batch_size, jinja, mmap, mlock, GPU layers, resources,
+#               api_key, etc.)
+#     → roles/llamacpp/defaults/main.yml
+#
+#   chatbot_*
+#     → roles/chatbot/defaults/main.yml
+#
+#   faig_*
+#     → roles/fortiaigate/defaults/main.yml
+#
+# To override any of these per-host, set the variable under your host's
+# `vars:` block in inventory/hosts.yml. See the existing examples in that
+# file (llama.cpp tuning section).
+
+# ---- interface default ----
+# The Fabric Studio faig-base qcow names NICs ens3/ens4 (not the site.yml default
+# ens3-as-primary assumption): on that image eth1->OOB Mgmt (ens4) leases the
+# address AND owns the default route, so the node's real management NIC is ens4.
+# Cloud VMs override this explicitly in the generated one-host inventory
+# (see gcp/scripts/build.sh, azure/scripts/build.sh). Loaded here because the
+# cloud build scripts generate their own one-host inventory
+# (inventory/hosts.yml is NOT read) -- playbook-adjacent group_vars/all is the
+# only repo-tracked var source site.yml will pick up.
+faig_primary_interface: ens4
+
+# ---- Shared kubeconfig ----
+# Genuinely cross-role: used by gpu, llamacpp, chatbot, ingress-nginx, and
+# nfs-provisioner tasks for kubectl/helm API calls. Kept here because it
+# isn't owned by any single role.
+kubeconfig_path: /etc/rancher/k3s/k3s.yaml

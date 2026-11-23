@@ -1,0 +1,87 @@
+---
+# NVIDIA Container Toolkit — provides nvidia-container-runtime which containerd
+# uses to inject GPU device nodes and the userspace driver into containers.
+#
+# k3s (>= 1.25) auto-detects the toolkit at startup and registers the `nvidia`
+# runtime in containerd's generated config. So:
+#   - If we install the toolkit BEFORE k3s starts → automatic
+#   - If we install the toolkit AFTER k3s is already running (which is our
+#     order here, since the gpu role runs after the k3s role) → we MUST
+#     restart k3s, which is what the handler at the bottom does.
+
+- name: Check whether nvidia-container-toolkit is already installed
+  ansible.builtin.command: nvidia-ctk --version
+  register: nvidia_ctk_check
+  changed_when: false
+  failed_when: false
+
+- name: Install NVIDIA Container Toolkit (Debian/Ubuntu)
+  when:
+    - nvidia_ctk_check.rc != 0
+    - ansible_os_family == "Debian"
+  block:
+    - name: Fetch NVIDIA libnvidia-container apt signing key
+      ansible.builtin.get_url:
+        url: https://nvidia.github.io/libnvidia-container/gpgkey
+        dest: /tmp/nvidia-container-toolkit.gpg.armored
+        mode: "0644"
+
+    - name: Dearmor key into /usr/share/keyrings
+      ansible.builtin.command:
+        cmd: gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg /tmp/nvidia-container-toolkit.gpg.armored
+      args:
+        creates: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+    - name: Add libnvidia-container apt repo
+      ansible.builtin.copy:
+        # `stable/deb/$(ARCH)` is the documented path; NVIDIA's repo handles
+        # codename routing internally, so the same source list works across
+        # Ubuntu/Debian releases.
+        content: |
+          deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /
+        dest: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+        owner: root
+        group: root
+        mode: "0644"
+      register: ct_repo_added
+
+    - name: Refresh apt cache
+      ansible.builtin.apt:
+        update_cache: true
+      when: ct_repo_added.changed
+
+    - name: Install nvidia-container-toolkit
+      ansible.builtin.apt:
+        name: nvidia-container-toolkit
+        state: present
+      notify: Restart k3s
+
+- name: Install NVIDIA Container Toolkit (RHEL family)
+  when:
+    - nvidia_ctk_check.rc != 0
+    - ansible_os_family == "RedHat"
+  block:
+    - name: Add libnvidia-container yum repo
+      ansible.builtin.get_url:
+        url: https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo
+        dest: /etc/yum.repos.d/nvidia-container-toolkit.repo
+        mode: "0644"
+
+    - name: Install nvidia-container-toolkit
+      ansible.builtin.dnf:
+        name: nvidia-container-toolkit
+        state: present
+      notify: Restart k3s
+
+# Flush handlers now so k3s restarts BEFORE we apply the device plugin —
+# otherwise the plugin pod schedules against a containerd that hasn't reloaded
+# its runtime registry yet, and the GPUs never get advertised.
+- name: Flush handlers so k3s restart happens before device plugin apply
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for k3s API to be ready after restart
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 6443
+    delay: 2
+    timeout: 120

@@ -1,0 +1,8 @@
+---
+# Role defaults — precedence rank #2. Override per-host in inventory/hosts.yml.
+
+k3s_version: v1.31.4+k3s1
+cluster_cidr: 10.42.0.0/16
+service_cidr: 10.43.0.0/16
+cluster_dns: 10.43.0.10
+flannel_backend: vxlan

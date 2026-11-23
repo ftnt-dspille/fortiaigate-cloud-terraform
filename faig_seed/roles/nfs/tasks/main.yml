@@ -1,0 +1,57 @@
+---
+# Install and configure NFS server on the k3s node itself.
+# The dynamic provisioner (deployed later via Helm) will create subdirectories here.
+
+- name: Install NFS server packages
+  ansible.builtin.apt:
+    name:
+      - nfs-kernel-server
+      - nfs-common
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Install NFS server packages (RHEL family)
+  ansible.builtin.dnf:
+    name:
+      - nfs-utils
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Ensure NFS export directory exists
+  ansible.builtin.file:
+    path: "{{ nfs_export_path }}"
+    state: directory
+    owner: nobody
+    group: nogroup
+    mode: "0777"
+  # Use 'nogroup' on Debian/Ubuntu; on RHEL it's 'nobody'. Handle both.
+  vars:
+    nogroup_name: "{{ 'nogroup' if ansible_os_family == 'Debian' else 'nobody' }}"
+
+- name: Create a sparse-allocated quota marker file
+  # 10 GB is small enough that a separate filesystem isn't worth the complexity.
+  # We just make sure the directory exists; size limiting is left to the underlying FS.
+  ansible.builtin.debug:
+    msg: "NFS export at {{ nfs_export_path }}; expected size ~{{ nfs_export_size_gb }} GB."
+
+- name: Configure /etc/exports
+  ansible.builtin.copy:
+    dest: /etc/exports
+    content: |
+      # Managed by Ansible
+      {{ nfs_export_path }} {{ nfs_allowed_cidr }}(rw,sync,no_subtree_check,no_root_squash)
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload NFS exports
+
+- name: Ensure NFS server is enabled and running
+  ansible.builtin.systemd:
+    name: "{{ 'nfs-kernel-server' if ansible_os_family == 'Debian' else 'nfs-server' }}"
+    enabled: true
+    state: started
+
+- name: Apply export changes immediately
+  ansible.builtin.command: exportfs -ra
+  changed_when: false

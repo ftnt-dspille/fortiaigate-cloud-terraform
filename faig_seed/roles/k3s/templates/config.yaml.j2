@@ -1,0 +1,36 @@
+---
+# Managed by Ansible - /etc/rancher/k3s/config.yaml
+
+# Pin to the primary interface so k3s advertises and binds on the right NIC
+node-ip: "{{ primary_iface_ip }}"
+bind-address: "{{ primary_iface_ip }}"
+advertise-address: "{{ primary_iface_ip }}"
+
+# TLS SANs - includes the DNAT'd external address and any extras
+tls-san:
+  - "{{ primary_iface_ip }}"
+  - "{{ external_address }}"
+{% for san in extra_tls_sans | default([]) %}
+  - "{{ san }}"
+{% endfor %}
+
+# Networking
+cluster-cidr: "{{ cluster_cidr }}"
+service-cidr: "{{ service_cidr }}"
+cluster-dns: "{{ cluster_dns }}"
+
+# CNI: Flannel (bundled with k3s, lightest option for a single-node cluster).
+# VXLAN is the default backend and works on a single host without extra kernel modules
+# beyond what stock Ubuntu/Debian ship. No separate CNI install step is required.
+flannel-backend: "{{ flannel_backend }}"
+
+# Disable bundled components we're replacing
+disable:
+  - traefik       # We use ingress-nginx instead
+  - servicelb     # ingress-nginx uses hostNetwork; LB unnecessary for single-node test
+
+# Kubeconfig (/etc/rancher/k3s/k3s.yaml) is mode 0600 — it carries cluster admin
+# credentials. The role copies it into the SSH user's ~/.kube/config (also 0600)
+# and exports KUBECONFIG so kubectl finds the right one without needing to read
+# the root-owned source file at runtime.
+write-kubeconfig-mode: "0600"

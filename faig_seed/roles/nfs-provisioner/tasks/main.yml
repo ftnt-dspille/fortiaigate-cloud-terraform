@@ -1,0 +1,47 @@
+---
+# Deploy the NFS subdir external provisioner pointed at the local NFS export.
+# This creates a `nfs-client` StorageClass that dynamically provisions PVs as
+# subdirectories under {{ nfs_export_path }}.
+
+- name: Add nfs-subdir-external-provisioner Helm repo
+  kubernetes.core.helm_repository:
+    name: nfs-subdir-external-provisioner
+    repo_url: https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Install/upgrade nfs-subdir-external-provisioner
+  kubernetes.core.helm:
+    name: nfs-provisioner
+    chart_ref: nfs-subdir-external-provisioner/nfs-subdir-external-provisioner
+    chart_version: "{{ nfs_provisioner_chart_version }}"
+    release_namespace: nfs-provisioner
+    create_namespace: true
+    values:
+      nfs:
+        # NFS server runs on this same node; mount via loopback so traffic never
+        # touches the LAN and the export can be restricted to 127.0.0.1.
+        server: "127.0.0.1"
+        path: "{{ nfs_export_path }}"
+      storageClass:
+        name: nfs-client
+        defaultClass: true
+        reclaimPolicy: Delete
+        archiveOnDelete: false
+    wait: true
+    wait_timeout: 3m
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+- name: Verify the StorageClass is registered
+  ansible.builtin.command: >
+    /usr/local/bin/k3s kubectl get storageclass nfs-client -o name
+  register: sc_check
+  changed_when: false
+  retries: 10
+  delay: 3
+  until: sc_check.rc == 0
+
+- name: Show storage class status
+  ansible.builtin.debug:
+    msg: "StorageClass 'nfs-client' is available and set as default."

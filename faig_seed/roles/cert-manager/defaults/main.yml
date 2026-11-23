@@ -1,0 +1,36 @@
+---
+# Role defaults - precedence rank #2. Override per-host in inventory/hosts.yml
+# or via -e extra vars (the GCP cloud scripts pass these on the command line).
+
+# Helm install
+cert_manager_chart_version: v1.16.3
+cert_manager_namespace: cert-manager
+
+# ACME issuer
+cert_manager_email: ""            # REQUIRED for real issuance (Let's Encrypt TOS)
+cert_manager_acme_server: https://acme-v02.api.letsencrypt.org/directory
+# For non-production testing, set the staging server; cert-manager switches the
+# acme-v02 production endpoint back for real issuance.
+cert_manager_issuer_name: letsencrypt-faig
+cert_manager_issuer_kind: ClusterIssuer
+
+# Google Cloud DNS DNS-01 solver.
+#   - project: GCP project that owns the delegated zone (e.g. faig.example.com).
+#   - Auth: cert-manager's cloudDNS solver uses Application Default Credentials
+#     (ADC). On a GCE VM the default compute service account is exposed via the
+#     metadata server with no key file to manage. That SA must hold
+#     roles/dns.admin on the project. If your SA lacks it, set
+#     cert_manager_dns_sa_secret to a Kubernetes Secret containing a key JSON
+#     and it is used instead of ADC.
+cert_manager_dns_project: ""      # e.g. my-gcp-project
+cert_manager_dns_zone: ""         # e.g. faig-example-com (Cloud DNS zone name)
+cert_manager_dns_sa_secret: ""    # optional: Secret name with a service-account key
+cert_manager_dns_sa_key: key.json # key inside that Secret holding the JSON
+
+# Certificate target. The FAIG UI/chatbot ingress falls back to the shared
+# default-ssl-certificate, so we write the issued cert into that same Secret to
+# replace the self-signed one. The hostname comes from the faig_seed role's
+# external_address (set to the VM's stable DNS name by the cloud scripts).
+cert_manager_target_secret: ingress-default-tls
+cert_manager_target_namespace: ingress-nginx
+cert_manager_cert_hostname: "{{ external_address }}"

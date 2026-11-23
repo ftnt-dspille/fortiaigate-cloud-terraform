@@ -1,0 +1,5 @@
+---
+# Intentionally empty. Included by teardown.yml via include_role with
+# public: true to expose this role's defaults/main.yml without running
+# the install tasks. Keeps role defaults precedence (below inventory)
+# so per-host overrides in inventory still win.

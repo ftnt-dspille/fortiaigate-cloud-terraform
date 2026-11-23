@@ -1,0 +1,130 @@
+---
+# Stages the FortiAIGate helm chart bundle into the SSH user's home so it can
+# be `helm install`'d interactively or by a downstream role. Steps:
+#   1. Upload the tar from the controller to ~/<tar>
+#   2. Extract it → ~/fortiaigate/
+#   3. Push every file in ./licenses/ on the controller into
+#      ~/fortiaigate/files/licenses/ on the host
+#   4. Seed ~/my-values.yaml from the chart's values.yaml (only if missing —
+#      preserves operator edits on re-runs)
+#
+# Play runs with become: true, so `~` would expand to the become user (/root),
+# not the SSH user. Use the gathered home of the connecting user (ansible_user_dir):
+# it is /root when we log in as root (the Fabric Studio config path) and
+# /home/<user> for a non-root sudo user — correct in both cases, unlike a
+# hardcoded /home/{{ ansible_user }} which yields a nonexistent /home/root.
+
+- name: Resolve SSH user's home directory
+  ansible.builtin.set_fact:
+    faig_user_home: "{{ ansible_user_dir }}"
+
+- name: Stat extracted FAIG directory on host
+  ansible.builtin.stat:
+    path: "{{ faig_user_home }}/{{ faig_extracted_dir }}"
+  register: faig_extracted_stat
+
+- name: Verify FAIG tar exists on the controller
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/{{ faig_tar_name }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: faig_tar_local
+  when: not faig_extracted_stat.stat.exists
+
+- name: Fail if FAIG tar is missing
+  ansible.builtin.fail:
+    msg: >-
+      FAIG tar not found at {{ playbook_dir }}/{{ faig_tar_name }} —
+      drop the archive at the playbook root or override `faig_tar_name`.
+  when:
+    - not faig_extracted_stat.stat.exists
+    - not faig_tar_local.stat.exists
+
+# Upload, extract, and cleanup are gated on the extracted dir being absent so
+# re-runs don't churn a 200 KB upload only to delete it again. To force a
+# clean re-extract on a chart bump: `rm -rf ~/fortiaigate` on the host.
+- name: Upload FAIG tar to user's home
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/{{ faig_tar_name }}"
+    dest: "{{ faig_user_home }}/{{ faig_tar_name }}"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+  when: not faig_extracted_stat.stat.exists
+
+- name: Extract FAIG tar (creates ~/{{ faig_extracted_dir }})
+  ansible.builtin.unarchive:
+    src: "{{ faig_user_home }}/{{ faig_tar_name }}"
+    dest: "{{ faig_user_home }}/"
+    remote_src: true
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+  when: not faig_extracted_stat.stat.exists
+
+- name: Remove uploaded FAIG tar after extraction
+  ansible.builtin.file:
+    path: "{{ faig_user_home }}/{{ faig_tar_name }}"
+    state: absent
+  when: not faig_extracted_stat.stat.exists
+
+- name: Find local license files on the controller
+  ansible.builtin.find:
+    paths: "{{ faig_local_licenses_dir }}"
+    file_type: file
+    recurse: false
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: faig_licenses
+
+- name: Warn if no license files were found
+  ansible.builtin.debug:
+    msg: >-
+      No license files in {{ faig_local_licenses_dir }} — skipping license
+      copy. Drop .lic files there and re-run when ready.
+  when: faig_licenses.files | length == 0
+
+- name: Ensure ~/{{ faig_extracted_dir }}/files/licenses exists
+  ansible.builtin.file:
+    path: "{{ faig_user_home }}/{{ faig_extracted_dir }}/files/licenses"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0755"
+
+- name: Copy license files into ~/{{ faig_extracted_dir }}/files/licenses/
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: "{{ faig_user_home }}/{{ faig_extracted_dir }}/files/licenses/{{ item.path | basename }}"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0640"
+  loop: "{{ faig_licenses.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when: faig_licenses.files | length > 0
+
+- name: Stat chart's values.yaml after extraction
+  ansible.builtin.stat:
+    path: "{{ faig_user_home }}/{{ faig_extracted_dir }}/values.yaml"
+  register: faig_values_stat
+
+- name: Fail if values.yaml not found in extracted chart
+  ansible.builtin.fail:
+    msg: >-
+      Expected {{ faig_user_home }}/{{ faig_extracted_dir }}/values.yaml after
+      extracting {{ faig_tar_name }}. Confirm the tar layout.
+  when: not faig_values_stat.stat.exists
+
+- name: Seed ~/{{ faig_my_values_filename }} from chart values.yaml (preserve edits)
+  ansible.builtin.copy:
+    src: "{{ faig_user_home }}/{{ faig_extracted_dir }}/values.yaml"
+    dest: "{{ faig_user_home }}/{{ faig_my_values_filename }}"
+    remote_src: true
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+    # Don't clobber operator edits on re-runs. Delete ~/my-values.yaml to
+    # force a re-seed from the upstream chart.
+    force: false

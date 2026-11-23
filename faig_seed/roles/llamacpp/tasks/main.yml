@@ -1,0 +1,276 @@
+---
+- name: Verify k3s kubeconfig is present
+  ansible.builtin.stat:
+    path: "{{ kubeconfig_path }}"
+  register: kubeconfig_stat
+
+- name: Fail if kubeconfig is missing
+  ansible.builtin.fail:
+    msg: "k3s kubeconfig not found at {{ kubeconfig_path }} — confirm k3s is installed."
+  when: not kubeconfig_stat.stat.exists
+
+- name: Verify kubectl is installed
+  ansible.builtin.command: kubectl version --client=true -o yaml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: kubectl_version
+  changed_when: false
+
+- name: Ensure hostPath directory exists for llama.cpp models
+  ansible.builtin.file:
+    path: "{{ llamacpp_hostpath_dir }}"
+    state: directory
+    owner: root
+    group: root
+    # 0777 because the llama.cpp image runs as a non-root UID we don't control
+    # here. If you pin securityContext.runAsUser, tighten this to match.
+    mode: "0777"
+
+- name: Validate llamacpp_flash_attn value
+  ansible.builtin.fail:
+    msg: >-
+      llamacpp_flash_attn must be one of: "on", "off", "auto"
+      (got: {{ llamacpp_flash_attn }}). Quote the value in YAML — bare
+      on/off are parsed as booleans.
+  when: (llamacpp_flash_attn | string | lower) not in ['on', 'off', 'auto']
+
+- name: Validate quantized KV cache requires flash-attn
+  ansible.builtin.fail:
+    msg: >-
+      llamacpp_kv_cache_type_k/v is set to {{ llamacpp_kv_cache_type_k }}/{{ llamacpp_kv_cache_type_v }}
+      but llamacpp_flash_attn is "off". Quantized KV cache requires flash attention.
+      Set llamacpp_flash_attn to "on" or "auto", or set both cache types to "f16".
+  when:
+    - (llamacpp_flash_attn | string | lower) == 'off'
+    - (llamacpp_kv_cache_type_k | lower) != 'f16' or (llamacpp_kv_cache_type_v | lower) != 'f16'
+
+- name: Warn if llamacpp_threads exceeds CPU limit
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: llamacpp_threads={{ llamacpp_threads }} exceeds
+      resources.limits.cpu={{ llamacpp_resources.limits.cpu }}. CFS throttling
+      will hurt throughput. Reduce threads or raise the CPU limit.
+  when:
+    - llamacpp_resources.limits.cpu is defined
+    - (llamacpp_threads | int) > (llamacpp_resources.limits.cpu | int)
+
+- name: Validate llamacpp_numa value
+  ansible.builtin.fail:
+    msg: >-
+      llamacpp_numa must be one of: "", "distribute", "isolate", "numactl"
+      (got: {{ llamacpp_numa }}).
+  when: (llamacpp_numa | string) not in ['', 'distribute', 'isolate', 'numactl']
+
+- name: Validate llamacpp_split_mode value
+  ansible.builtin.fail:
+    msg: >-
+      llamacpp_split_mode must be one of: "", "none", "layer", "row"
+      (got: {{ llamacpp_split_mode }}).
+  when: (llamacpp_split_mode | string) not in ['', 'none', 'layer', 'row']
+
+- name: Validate llamacpp_log_format value
+  ansible.builtin.fail:
+    msg: >-
+      llamacpp_log_format must be one of: "", "text", "json"
+      (got: {{ llamacpp_log_format }}).
+  when: (llamacpp_log_format | string) not in ['', 'text', 'json']
+
+# Args are assembled as a list. Each "block" appends only when the variable
+# diverges from the llama-server default, so the rendered command stays minimal
+# when users haven't touched the dial.
+- name: Build llama-server base args
+  ansible.builtin.set_fact:
+    llamacpp_server_args: >-
+      {{
+        [
+          '--model', '/models/' ~ llamacpp_model_file,
+          '--alias', llamacpp_model_alias,
+          '--host', '0.0.0.0',
+          '--port', '8080',
+          '--ctx-size', llamacpp_ctx_size | string,
+          '--parallel', llamacpp_parallel | string,
+          '--threads', llamacpp_threads | string,
+          '--threads-batch', llamacpp_threads_batch | string,
+          '--batch-size', llamacpp_batch_size | string,
+          '--ubatch-size', llamacpp_ubatch_size | string,
+          '--n-predict', llamacpp_n_predict | string,
+          '--cache-type-k', llamacpp_kv_cache_type_k,
+          '--cache-type-v', llamacpp_kv_cache_type_v,
+          '--flash-attn', llamacpp_flash_attn | string,
+          '--metrics'
+        ]
+        + (['--mlock'] if (llamacpp_mlock | bool) else [])
+        + ([] if (llamacpp_mmap | bool) else ['--no-mmap'])
+        + ([] if (llamacpp_cont_batching | bool) else ['--no-cont-batching'])
+        + ([] if (llamacpp_warmup | bool) else ['--no-warmup'])
+        + (['--numa', llamacpp_numa] if (llamacpp_numa | length) > 0 else [])
+        + (['--cache-reuse', llamacpp_cache_reuse | string] if (llamacpp_cache_reuse | int) > 0 else [])
+        + (['--defrag-thold', llamacpp_defrag_thold | string] if (llamacpp_defrag_thold | string | length) > 0 else [])
+        + (['--rope-freq-base', llamacpp_rope_freq_base | string] if (llamacpp_rope_freq_base | string | length) > 0 else [])
+        + (['--rope-freq-scale', llamacpp_rope_freq_scale | string] if (llamacpp_rope_freq_scale | string | length) > 0 else [])
+        + (['--chat-template', llamacpp_chat_template] if (llamacpp_chat_template | length) > 0 else [])
+        + (['--jinja'] if (llamacpp_jinja | bool) else [])
+        + (['--log-format', llamacpp_log_format] if (llamacpp_log_format | length) > 0 else [])
+        + (['--verbose'] if (llamacpp_verbose | bool) else [])
+        + (['--n-gpu-layers', llamacpp_n_gpu_layers | string] if llamacpp_gpu_enabled else [])
+        + (['--main-gpu', llamacpp_main_gpu | string] if (llamacpp_gpu_enabled and (llamacpp_main_gpu | string | length) > 0) else [])
+        + (['--tensor-split', llamacpp_tensor_split] if (llamacpp_gpu_enabled and (llamacpp_tensor_split | length) > 0) else [])
+        + (['--split-mode', llamacpp_split_mode] if (llamacpp_gpu_enabled and (llamacpp_split_mode | length) > 0) else [])
+        + (['--api-key', llamacpp_api_key] if (llamacpp_api_key | length) > 0 else [])
+        + (llamacpp_extra_args | default([]) | map('string') | list)
+      }}
+
+- name: Show resolved llama-server args (api-key redacted)
+  ansible.builtin.debug:
+    msg: >-
+      {{ llamacpp_server_args
+         if (llamacpp_api_key | length) == 0
+         else (llamacpp_server_args | map('replace', llamacpp_api_key, '<redacted>') | list) }}
+
+# Merge nvidia.com/gpu into the resources block only when GPU is enabled.
+# Keeps the deployment template free of conditional Jinja around YAML keys.
+- name: Compose effective container resources (GPU-aware)
+  ansible.builtin.set_fact:
+    llamacpp_resources_effective: >-
+      {{
+        llamacpp_resources
+        | combine({
+            'limits': (llamacpp_resources.limits | default({}))
+              | combine({'nvidia.com/gpu': llamacpp_gpu_count | default(1)})
+          }, recursive=True)
+        if llamacpp_gpu_enabled
+        else llamacpp_resources
+      }}
+
+- name: Apply llama.cpp namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'namespace.yaml.j2') | from_yaml }}"
+
+- name: Apply hostPath PersistentVolume
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'pv.yaml.j2') | from_yaml }}"
+
+- name: Apply PersistentVolumeClaim
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'pvc.yaml.j2') | from_yaml }}"
+
+- name: Apply Service
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'service.yaml.j2') | from_yaml }}"
+
+- name: Apply Deployment
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'deployment.yaml.j2') | from_yaml }}"
+
+- name: Apply Ingress for external access
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: "{{ 'present' if llamacpp_ingress_enabled else 'absent' }}"
+    definition: "{{ lookup('template', 'ingress.yaml.j2') | from_yaml }}"
+
+- name: Wait for llama.cpp deployment to be Available
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ llamacpp_namespace }}"
+    name: llamacpp
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    # First-run init container downloads multi-GB GGUF from HuggingFace.
+    # Raise this if your link is slow or you swap in a 7B+ model.
+    wait_timeout: 1800
+
+- name: Discover the running llama.cpp pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ llamacpp_namespace }}"
+    label_selectors:
+      - "app=llamacpp"
+    field_selectors:
+      - status.phase=Running
+  register: llamacpp_pods
+
+- name: Fail if no running llama.cpp pod
+  ansible.builtin.fail:
+    msg: "No Running pod found for llamacpp in {{ llamacpp_namespace }}"
+  when: llamacpp_pods.resources | length == 0
+
+# The upstream llama.cpp image is distroless — no shell, no curl/wget. We can't
+# `kubectl exec ... wget` against it. Instead, hit the pod IP directly from the
+# k3s_node (the CNI bridge makes pod IPs routable from the host network
+# namespace). This also lets us send Authorization: Bearer cleanly when
+# llamacpp_api_key is set; the apiserver proxy would otherwise strip it.
+- name: Smoke test — list models via pod IP
+  ansible.builtin.uri:
+    url: "http://{{ llamacpp_pods.resources[0].status.podIP }}:8080/v1/models"
+    headers: >-
+      {{
+        {'Authorization': 'Bearer ' ~ llamacpp_api_key}
+        if (llamacpp_api_key | length) > 0 else {}
+      }}
+    return_content: true
+    status_code: 200
+  register: llamacpp_models
+  retries: 10
+  delay: 3
+  until: llamacpp_models.status | default(0) == 200
+  no_log: "{{ (llamacpp_api_key | length) > 0 }}"
+
+# Prune only AFTER the new model has been verified to load. This guarantees
+# we never delete a working model on behalf of a broken swap.
+- name: Find existing GGUF files under {{ llamacpp_hostpath_dir }}
+  ansible.builtin.find:
+    paths: "{{ llamacpp_hostpath_dir }}"
+    patterns:
+      - "*.gguf"
+      - "*.gguf.partial"
+    file_type: file
+  register: llamacpp_existing_models
+  when: llamacpp_prune_old_models | bool
+
+- name: Remove stale GGUF files (keep only {{ llamacpp_model_file }})
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ llamacpp_existing_models.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when:
+    - llamacpp_prune_old_models | bool
+    - (item.path | basename) != llamacpp_model_file
+  register: llamacpp_pruned
+
+- name: Report pruned files
+  ansible.builtin.debug:
+    msg: "Pruned {{ llamacpp_pruned.results | selectattr('changed', 'equalto', true) | map(attribute='item.path') | list }}"
+  when:
+    - llamacpp_prune_old_models | bool
+    - llamacpp_pruned is defined
+    - (llamacpp_pruned.results | default([]) | selectattr('changed', 'equalto', true) | list | length) > 0
+
+- name: Show llama.cpp state and endpoints
+  ansible.builtin.debug:
+    msg:
+      - "llama.cpp /v1/models response:"
+      - "{{ llamacpp_models.content | default(llamacpp_models.json | default('')) | string }}"
+      - ""
+      - "In-cluster endpoint (used by the chatbot and any other pods):"
+      - "  http://llamacpp.{{ llamacpp_namespace }}.svc.cluster.local:{{ llamacpp_service_port }}/v1"
+      - ""
+      - "External access via ingress:"
+      - "  https://<node-ip-or-host>{{ llamacpp_ingress_path }}/v1/models"

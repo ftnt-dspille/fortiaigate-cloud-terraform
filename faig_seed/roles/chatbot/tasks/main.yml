@@ -1,0 +1,200 @@
+---
+# Build the chatbot Streamlit image on the node, import it into k3s containerd,
+# and deploy it as a Kubernetes workload behind ingress-nginx at /chat.
+#
+# Why build on the node?
+# - k3s has no built-in image registry, and the cluster is single-node.
+# - Building locally and importing via `k3s ctr images import` avoids registry
+#   infrastructure entirely. Image tag is a content hash so re-runs are cheap.
+
+# ---------------------------------------------------------------------------
+# Sanity checks
+# ---------------------------------------------------------------------------
+
+- name: Verify k3s kubeconfig is present
+  ansible.builtin.stat:
+    path: "{{ kubeconfig_path }}"
+  register: kubeconfig_stat
+
+- name: Fail if kubeconfig is missing
+  ansible.builtin.fail:
+    msg: "k3s kubeconfig not found at {{ kubeconfig_path }} — run the k3s role first."
+  when: not kubeconfig_stat.stat.exists
+
+# ---------------------------------------------------------------------------
+# Stage source on the node
+# ---------------------------------------------------------------------------
+
+- name: Ensure chatbot build directory exists
+  ansible.builtin.file:
+    path: "{{ chatbot_build_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Sync chatbot source onto the node
+  ansible.builtin.copy:
+    src: "{{ chatbot_source_dir }}/"
+    dest: "{{ chatbot_build_dir }}/"
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+  register: chatbot_src
+
+# ---------------------------------------------------------------------------
+# Compute a content-addressed image tag, build only when the source changed
+# ---------------------------------------------------------------------------
+
+- name: Hash chatbot build context for image tag
+  ansible.builtin.shell: |
+    set -o pipefail
+    find . -type f \( -name 'Dockerfile' -o -name '*.py' -o -name '*.txt' \) \
+      -exec sha256sum {} + \
+      | sort \
+      | sha256sum \
+      | awk '{print $1}' \
+      | cut -c1-12
+  args:
+    chdir: "{{ chatbot_build_dir }}"
+    executable: /bin/bash
+  register: chatbot_image_hash
+  changed_when: false
+
+- name: Set image reference facts
+  ansible.builtin.set_fact:
+    chatbot_image_tag: "{{ chatbot_image_hash.stdout }}"
+    chatbot_image_ref: "{{ chatbot_image_repo }}:{{ chatbot_image_hash.stdout }}"
+
+# ---------------------------------------------------------------------------
+# Ensure docker is installed (used only as a builder; k3s uses containerd)
+# ---------------------------------------------------------------------------
+
+- name: Install docker (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - docker.io
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Install docker (RHEL family)
+  ansible.builtin.dnf:
+    name:
+      - docker
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Ensure docker service is enabled and running
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+# ---------------------------------------------------------------------------
+# Build + import only if the image isn't already in containerd
+# ---------------------------------------------------------------------------
+
+- name: Check whether the target image already exists in k3s containerd
+  ansible.builtin.shell: |
+    set -o pipefail
+    /usr/local/bin/k3s ctr images ls -q | grep -Fx "docker.io/library/{{ chatbot_image_ref }}" \
+      || /usr/local/bin/k3s ctr images ls -q | grep -Fx "{{ chatbot_image_ref }}"
+  args:
+    executable: /bin/bash
+  register: chatbot_image_present
+  changed_when: false
+  failed_when: false
+
+- name: Build chatbot image with docker
+  ansible.builtin.command: >
+    docker build -t {{ chatbot_image_ref }} {{ chatbot_build_dir }}
+  when: chatbot_image_present.rc != 0
+  register: chatbot_build
+  changed_when: chatbot_build.rc == 0
+
+- name: Save built image to a tarball
+  ansible.builtin.command: >
+    docker save -o /tmp/chatbot-{{ chatbot_image_tag }}.tar {{ chatbot_image_ref }}
+  when: chatbot_image_present.rc != 0
+  changed_when: false
+
+- name: Import image tarball into k3s containerd
+  ansible.builtin.command: >
+    /usr/local/bin/k3s ctr images import /tmp/chatbot-{{ chatbot_image_tag }}.tar
+  when: chatbot_image_present.rc != 0
+  changed_when: true
+
+- name: Remove image tarball
+  ansible.builtin.file:
+    path: "/tmp/chatbot-{{ chatbot_image_tag }}.tar"
+    state: absent
+
+# ---------------------------------------------------------------------------
+# Apply Kubernetes manifests
+# ---------------------------------------------------------------------------
+
+- name: Ensure chatbot namespace exists
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ chatbot_namespace }}"
+
+- name: Apply chatbot Secret
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'secret.yaml.j2') | from_yaml }}"
+  no_log: true
+
+- name: Apply chatbot ConfigMap
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'configmap.yaml.j2') | from_yaml }}"
+
+- name: Apply chatbot Deployment
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'deployment.yaml.j2') | from_yaml }}"
+
+- name: Apply chatbot Service
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: present
+    definition: "{{ lookup('template', 'service.yaml.j2') | from_yaml }}"
+
+- name: Apply chatbot Ingress
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig_path }}"
+    state: "{{ 'present' if chatbot_ingress_enabled else 'absent' }}"
+    definition: "{{ lookup('template', 'ingress.yaml.j2') | from_yaml }}"
+
+- name: Wait for chatbot Deployment to be Available
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ chatbot_namespace }}"
+    name: "{{ chatbot_release_name }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 300
+
+- name: Show chatbot endpoints
+  ansible.builtin.debug:
+    msg:
+      - "Chatbot deployed:"
+      - "  image:           {{ chatbot_image_ref }}"
+      - "  namespace:       {{ chatbot_namespace }}"
+      - "  in-cluster URL:  http://{{ chatbot_release_name }}.{{ chatbot_namespace }}.svc.cluster.local:{{ chatbot_service_port }}{{ chatbot_ingress_path }}/"
+      - "  external URL:    https://{{ external_address }}{{ chatbot_ingress_path }}/"
+      - "  LLM endpoint:    {{ chatbot_llm_endpoint }}"

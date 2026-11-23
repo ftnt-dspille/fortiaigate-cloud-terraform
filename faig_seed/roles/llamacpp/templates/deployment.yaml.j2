@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llamacpp
+  namespace: {{ llamacpp_namespace }}
+  labels:
+    app: llamacpp
+spec:
+  replicas: 1
+  strategy:
+    # hostPath RWO: a rolling update would deadlock on the PVC.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: llamacpp
+  template:
+    metadata:
+      labels:
+        app: llamacpp
+    spec:
+{% if llamacpp_gpu_enabled %}
+      # Routes the pod through nvidia-container-runtime so NVIDIA userspace
+      # libraries (libcuda.so etc.) and /dev/nvidia* are injected into the
+      # container. Matches the RuntimeClass applied by the gpu role.
+      runtimeClassName: nvidia
+{% endif %}
+      initContainers:
+        # Idempotent GGUF fetch: if the file already exists on the hostPath
+        # PVC, skip the download. Partial writes go to `.partial` and are
+        # renamed at the end so a torn download never leaves a truthy stub.
+        - name: model-fetch
+          image: curlimages/curl:8.10.1
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              dest="/models/{{ llamacpp_model_file }}"
+              if [ -s "$dest" ]; then
+                echo "Model present: $dest ($(stat -c%s "$dest") bytes) — skipping download"
+                exit 0
+              fi
+              echo "Downloading {{ llamacpp_model_url }} -> $dest"
+              tmp="$dest.partial"
+              curl -fL --retry 5 --retry-delay 10 -C - -o "$tmp" "{{ llamacpp_model_url }}"
+              mv "$tmp" "$dest"
+              echo "Done: $(stat -c%s "$dest") bytes"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      containers:
+        - name: llama-server
+          image: "{{ llamacpp_image }}"
+          imagePullPolicy: IfNotPresent
+          args: {{ llamacpp_server_args | to_json }}
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+{{ llamacpp_resources_effective | to_nice_yaml(indent=2) | indent(12, true) }}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ llamacpp_pvc_name }}

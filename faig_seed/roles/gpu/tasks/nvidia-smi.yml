@@ -1,0 +1,56 @@
+---
+# Ensure /usr/bin/nvidia-smi is present.
+#
+# nvidia-smi ships in nvidia-utils-<branch> (Debian) — a pure userspace
+# package. We install it here, BEFORE the driver pre-check in main.yml, so
+# the binary is present independently of whether the kernel driver is loaded.
+# This handles all four cases consistently:
+#   - driver loaded + binary present → no-op (skipped, idempotent)
+#   - driver loaded + binary missing → installs nvidia-utils; pre-check now
+#     passes; full driver install is skipped (we don't want to disturb a
+#     working driver just because the utils package was missing)
+#   - no driver  + binary missing    → installs nvidia-utils; pre-check fails;
+#     main.yml proceeds to a full cuda-drivers install
+#   - no driver  + binary present (rare) → no-op; pre-check fails; main.yml
+#     proceeds to a full cuda-drivers install
+#
+# The CUDA apt/dnf repo is added unconditionally by repo-debian.yml /
+# repo-redhat.yml earlier in main.yml, so nvidia-utils-<branch> is always
+# resolvable when we get here.
+
+- name: Check whether nvidia-smi is already on PATH
+  ansible.builtin.shell: command -v nvidia-smi
+  args:
+    executable: /bin/bash
+  register: nvidia_smi_locate_pre
+  changed_when: false
+  failed_when: false
+
+- name: Install nvidia-utils-{{ nvidia_driver_branch }} (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: "nvidia-utils-{{ nvidia_driver_branch }}"
+    state: present
+    update_cache: false
+  when:
+    - nvidia_smi_locate_pre.rc != 0
+    - ansible_os_family == "Debian"
+
+- name: Install cuda-drivers-{{ nvidia_driver_branch }} (RHEL — provides nvidia-smi)
+  ansible.builtin.dnf:
+    name: "cuda-drivers-{{ nvidia_driver_branch }}"
+    state: present
+  when:
+    - nvidia_smi_locate_pre.rc != 0
+    - ansible_os_family == "RedHat"
+
+- name: Re-locate nvidia-smi
+  ansible.builtin.shell: command -v nvidia-smi
+  args:
+    executable: /bin/bash
+  register: nvidia_smi_path
+  changed_when: false
+  failed_when: nvidia_smi_path.rc != 0
+
+- name: Confirm nvidia-smi presence
+  ansible.builtin.debug:
+    msg: "nvidia-smi installed at {{ nvidia_smi_path.stdout }}"

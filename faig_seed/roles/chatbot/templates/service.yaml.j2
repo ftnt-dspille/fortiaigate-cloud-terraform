@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ chatbot_release_name }}
+  namespace: {{ chatbot_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ chatbot_release_name }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ chatbot_release_name }}
+  ports:
+    - name: http
+      port: {{ chatbot_service_port }}
+      targetPort: 8501
+      protocol: TCP

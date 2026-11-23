@@ -1,0 +1,18 @@
+---
+# Role defaults — precedence rank #2. Override per-host in inventory/hosts.yml.
+
+# Tar archive sitting at the playbook root on the controller. Bump when a new
+# build drops; the role uploads + extracts whatever name is set here.
+faig_tar_name: "FAIG_helm_chart-V8.0.1-build0031-FORTINET.tar"
+
+# Local directory on the controller scanned for license files. Every regular
+# file directly under it is uploaded into ~/fortiaigate/files/licenses/.
+faig_local_licenses_dir: "{{ playbook_dir }}/licenses"
+
+# Extracted directory name produced by the tar. Used to locate values.yaml and
+# build the licenses destination path.
+faig_extracted_dir: "fortiaigate"
+
+# Name of the working values copy in the SSH user's home — kept separate from
+# the chart's own values.yaml so user edits survive re-runs.
+faig_my_values_filename: "my-values.yaml"

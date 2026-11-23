@@ -1,0 +1,23 @@
+# SSH public key (required)
+ssh_public_key = "ssh-rsa AAAAB3... your-key"
+
+# --- Build phase (CPU, cheap) ---
+# D4s_v5: 4 vCPU, 16 GiB, ~$0.20/hr on-demand
+instance_type = "Standard_D4s_v5"
+spot          = false
+
+# --- GPU phase (override these) ---
+# NC4as_T4_v3: 1x T4 GPU, 28 GiB, ~$0.53/hr on-demand / ~$0.15/hr spot
+# instance_type     = "Standard_NC4as_T4_v3"
+# spot              = true
+# spot_max_price    = 0.20
+
+# --- Clone phase (override these) ---
+# source_image_id   = "/subscriptions/.../images/faig-build-20260101"
+# vm_count          = 3
+# disk_type         = "PremiumV2_LRS"
+
+# Restrict SSH + HTTPS to your IP (REQUIRED for security)
+# Find your IP: curl -s http://checkip.amazonaws.com
+ssh_source_ips   = ["203.0.113.10/32"]
+https_source_ips = ["203.0.113.10/32"]

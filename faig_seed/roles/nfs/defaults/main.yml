@@ -1,0 +1,6 @@
+---
+# Role defaults — precedence rank #2. Override per-host in inventory/hosts.yml.
+
+nfs_export_path: /srv/nfs/k3s
+nfs_export_size_gb: 10
+nfs_allowed_cidr: "127.0.0.1/32"

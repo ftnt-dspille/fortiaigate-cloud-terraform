@@ -1,0 +1,30 @@
+---
+# Confirm the kubelet now advertises nvidia.com/gpu on at least one node.
+# The plugin can take a few seconds after the DaemonSet reports Ready before
+# the kubelet status update lands on the node object, so retry briefly.
+#
+# NOTE: Use dict bracket access — `selectattr('nvidia.com/gpu', 'defined')`
+# would fail because Jinja interprets the dots in the key as attribute
+# traversal (obj.nvidia.com.gpu), not as a literal dict key.
+
+- name: Query node capacity for nvidia.com/gpu
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ kubeconfig_path }}"
+    api_version: v1
+    kind: Node
+  register: gpu_nodes
+  retries: 12
+  delay: 5
+  until: >-
+    (gpu_nodes.resources | default([])) | length > 0
+    and (gpu_nodes.resources[0].status.capacity['nvidia.com/gpu'] | default('0') | int) >= 1
+
+- name: Summarize GPU capacity per node
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.metadata.name }}: nvidia.com/gpu capacity =
+      {{ item.status.capacity['nvidia.com/gpu'] | default('<none>') }},
+      allocatable = {{ item.status.allocatable['nvidia.com/gpu'] | default('<none>') }}
+  loop: "{{ gpu_nodes.resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"

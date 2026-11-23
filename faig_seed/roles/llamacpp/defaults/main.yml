@@ -1,0 +1,229 @@
+---
+# Role defaults -- precedence rank #2.
+#
+# These live in defaults/ rather than group_vars/all.yml so that values set in
+# inventory's `vars:` block (rank #3) actually override them. Putting them in
+# group_vars/all (rank #5) would silently win over inventory.
+# See: https://docs.ansible.com/ansible/latest/playbook_guide/playbooks_variables.html#understanding-variable-precedence
+
+# ============================================================================
+# Namespace / image / storage
+# ============================================================================
+llamacpp_namespace: llamacpp
+
+# CPU image by default. Swaps to the CUDA build when llamacpp_gpu_enabled
+# (which itself tracks gpu_enabled from roles/gpu/defaults/main.yml).
+# https://github.com/ggml-org/llama.cpp/pkgs/container/llama.cpp
+llamacpp_image: "{{ 'ghcr.io/ggml-org/llama.cpp:server-cuda' if llamacpp_gpu_enabled else 'ghcr.io/ggml-org/llama.cpp:server' }}"
+
+llamacpp_hostpath_dir: /var/lib/llamacpp
+llamacpp_pv_name: llamacpp-models-pv
+llamacpp_pvc_name: llamacpp-models-pvc
+llamacpp_storage_size: 30Gi
+llamacpp_service_port: 8080         # native llama-server port; no remap
+
+# Off: the ingress publishes llama-server on the FAIG hostname with no auth, a
+# path around every guardrail, log and cost. FAIG reaches it by cluster DNS.
+llamacpp_ingress_enabled: false
+llamacpp_ingress_class: nginx
+llamacpp_ingress_path: /llm
+
+# ============================================================================
+# Model
+# ============================================================================
+# Workshop model: Qwen2.5-3B-Instruct Q4_K_M (bartowski build, 1.93 GB; fits the L4 beside
+# FAIG's guard models at ~2.3 GiB). Measured 91% vs 78% for Llama-3.2-1B on the bench, half
+# the speed, scenarios 12/12 (see topologies/fortiaigate_lab/MODEL_SWAP_QWEN.md).
+# The previous default was bartowski/Llama-3.2-1B-Instruct-GGUF/...-Q4_K_M.gguf.
+# Direct GGUF URL. Quantization is encoded in the filename. Q4_K_M for a 3B
+# model is ~2.2GB on disk / ~3.5GB resident. Override per environment via
+# `-e llamacpp_model_url=...` or LLAMACPP_MODEL_URL on the controller.
+llamacpp_model_url: "{{ lookup('env', 'LLAMACPP_MODEL_URL') | default('https://huggingface.co/bartowski/Qwen2.5-3B-Instruct-GGUF/resolve/main/Qwen2.5-3B-Instruct-Q4_K_M.gguf', true) }}"
+llamacpp_model_file: "{{ llamacpp_model_url | basename | regex_replace('\\?.*$', '') }}"
+
+# OpenAI `model` field clients must send. llama-server returns this from
+# /v1/models when --alias is set, so swapping quantizations doesn't break clients.
+# Every workshop tool (send-prompt, run-scenarios, the scenario catalog) defaults
+# to llama3.2:1b. The alias is KEPT although the model is now Qwen2.5-3B, so nothing that
+# names it (FAIG model registration, keys, guides, scenarios) has to change; the FAIG Models
+# page therefore still says 1B. Renaming is a separate, larger change.
+llamacpp_model_alias: "llama3.2:1b"
+
+# ============================================================================
+# Runtime knobs -- sized for 3B Q4 on a single-node host
+# ============================================================================
+llamacpp_ctx_size: 8192
+# llama-server divides ctx_size across parallel slots: with parallel=2 and
+# ctx=8192 each slot gets 4096 tokens. Drop to 1 if you only ever have a
+# single concurrent user -- gives that user the full ctx_size window.
+# 4 slots: a class of ~10 students shares one node.
+llamacpp_parallel: 4
+# MUST be <= llamacpp_resources.limits.cpu below. Exceeding the CFS quota
+# causes thread contention, not parallelism.
+# Set to PHYSICAL cores, not logical/vCPUs -- llama.cpp's inner loops are
+# memory-bandwidth-bound, so SMT siblings fight for the same L1/L2 cache.
+# On a 16-vCPU node that's typically 8 physical cores. Verify with
+# `lscpu | grep -E '^(CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket)'`
+# and adjust. If you have 16 real cores (no SMT), 12 is a better fit.
+llamacpp_threads: 6
+# Threads used during prompt processing (batched eval). Equal to llamacpp_threads
+# is a safe default; set lower if prompt-eval starves generation under load.
+llamacpp_threads_batch: "{{ llamacpp_threads }}"
+# Default n_predict cap when a client doesn't pass max_tokens. The chatbot's
+# OpenAI client sets its own max_tokens, so this is just a server-side ceiling.
+llamacpp_n_predict: 512
+# Logical / physical batch sizes. Larger logical batch (--batch-size) improves
+# prompt-eval throughput when threads aren't the bottleneck. ubatch caps peak
+# RAM during eval -- keep it at 512 unless RAM headroom is large.
+# At 4 threads, 512/512 was right; at 8+ threads, 1024/512 wins on prompt eval.
+llamacpp_batch_size: 1024
+llamacpp_ubatch_size: 512
+# Flash Attention. Required if you want quantized KV cache below. Works on
+# both CPU and CUDA in recent llama.cpp builds.
+# Recent llama-server takes a tri-state value, not a boolean: "on", "off",
+# or "auto". Must be quoted -- bare `on`/`off` are parsed as YAML booleans.
+llamacpp_flash_attn: "on"
+# Quantized KV cache. q8_0 ≈ half the RAM of f16 with negligible quality loss.
+# Set to "f16" to disable. Requires llamacpp_flash_attn=true.
+# Valid: f16, q8_0, q5_0, q5_1, q4_0, q4_1
+llamacpp_kv_cache_type_k: q8_0
+llamacpp_kv_cache_type_v: q8_0
+# Pin model weights in RAM so the kernel can't page them out under memory
+# pressure. Cheap insurance on CPU; needs resources.limits.memory headroom
+# for weights + KV cache + activations.
+llamacpp_mlock: false
+llamacpp_n_gpu_layers: 999          # only applied when llamacpp_gpu_enabled
+
+# ============================================================================
+# Additional llama-server dials (override per-host in inventory/hosts.yml)
+# ============================================================================
+# Each dial below maps to a specific llama-server CLI flag. Defaults preserve
+# pre-existing behavior -- only flags whose value diverges from the llama-server
+# default are emitted, so the args list stays minimal in the common case.
+# See: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
+
+# Memory-map the model file. true (default) = --mmap implicit; false → --no-mmap.
+# Disable on filesystems with slow mmap (some networked FS) or when you want
+# the entire model resident in RAM from the start (combined with mlock).
+llamacpp_mmap: true
+
+# Continuous batching -- interleave generation across slots. On by default in
+# llama-server; setting false emits --no-cont-batching (throughput drops, but
+# slot isolation improves).
+llamacpp_cont_batching: true
+
+# NUMA policy. "" (default) = no flag. Useful on multi-socket hosts.
+# Valid: "" | "distribute" | "isolate" | "numactl"
+llamacpp_numa: ""
+
+# Reuse prefix KV cache across requests in the same slot -- speeds up multi-turn
+# chats by avoiding re-prefill of identical prompt prefixes. 0 (default) = off.
+# Set to a positive integer (e.g. 256) to enable; the value is the min token
+# count of a prefix that's eligible for reuse.
+llamacpp_cache_reuse: 0
+
+# KV cache defrag threshold (float, 0.0-1.0). Empty (default) = use the
+# llama-server built-in default. Lower values defrag more aggressively, freeing
+# slot capacity sooner at the cost of more memmove work.
+llamacpp_defrag_thold: ""
+
+# Warmup pass at startup. true (default) = run it; false → --no-warmup
+# (faster cold start, slower first request).
+llamacpp_warmup: true
+
+# ---- Multi-GPU (only emitted when llamacpp_gpu_enabled) ----
+# Empty defaults = let llama-server pick. Override when you have >1 GPU.
+# llamacpp_main_gpu:     index of the GPU that holds non-split tensors (e.g. "0")
+# llamacpp_tensor_split: comma-separated weights, one per GPU (e.g. "3,1" splits
+#                        75/25 across two GPUs)
+# llamacpp_split_mode:   "none" | "layer" (default) | "row"
+llamacpp_main_gpu: ""
+llamacpp_tensor_split: ""
+llamacpp_split_mode: ""
+
+# ---- RoPE scaling (long-context overrides) ----
+# Most GGUFs carry these in metadata -- leave empty to use the model's defaults.
+# Override only when you know the model needs different scaling, e.g. when
+# extending context beyond the model's trained length.
+llamacpp_rope_freq_base: ""
+llamacpp_rope_freq_scale: ""
+
+# ---- Chat template handling ----
+# Override the chat template the server applies to OpenAI-style /chat/completions.
+# Empty = auto-detect from GGUF metadata. Set to a name ("chatml", "llama3",
+# "gemma", etc.) or an absolute path inside the container to a template file.
+llamacpp_chat_template: ""
+# Use Jinja for chat template rendering (required for some recent templates
+# that ship Jinja-only). Default false -- the C++ template engine is faster
+# but supports a smaller set of templates.
+llamacpp_jinja: false
+
+# ---- Logging ----
+# "" (default) = llama-server's default (text). Set "json" for structured logs
+# that play nicely with log aggregators.
+llamacpp_log_format: ""
+# Verbose server logs. false (default) -- set true when debugging.
+llamacpp_verbose: false
+
+# ---- Escape hatch ----
+# Free-form list of extra CLI args appended verbatim to llama-server. Use this
+# to pass any flag not modeled above without editing the role. Example:
+#   llamacpp_extra_args: ["--predict", "1024", "--no-display-prompt"]
+llamacpp_extra_args: []
+
+# ============================================================================
+# GPU wiring
+# ============================================================================
+# Tracks the host-level `gpu_enabled` flag (defined in roles/gpu/defaults/main.yml).
+# When the host has GPU enabled, the gpu role installs the driver + toolkit +
+# device plugin, then llamacpp uses the CUDA image, passes --n-gpu-layers, and
+# requests nvidia.com/gpu. Override to force-disable on a GPU host (e.g. to
+# benchmark CPU on the same machine) or to force-enable when you've installed
+# the host stack out-of-band.
+llamacpp_gpu_enabled: "{{ gpu_enabled | bool }}"
+llamacpp_gpu_count: 1
+
+# ============================================================================
+# Pod resources (k8s scheduler)
+# ============================================================================
+# Sized for the 8-vCPU g2-standard-8 GCP node. A limit of 6 leaves 2 vCPUs for
+# FAIG's CPU-side pods (gateway, dlp-scanner, guardrail, logd, postgres) while
+# llama.cpp is generating.
+#
+# requests.cpu is a SCHEDULING RESERVATION -- it must fit alongside the
+# requests of every other pod on the node. Keep it small (1) so scheduling
+# succeeds; FAIG 8.0.2 alone requests ~7.15 of 8 vCPUs, so even 1 CPU left
+# the pod Pending. The pod is Burstable and can still consume up to limits.cpu under
+# load. Raising it past what the node has free will produce:
+#   FailedScheduling ... Insufficient cpu
+# To see the headroom: kubectl describe node | grep -A6 'Allocated resources'
+#
+# If you change node sizing: keep limits.cpu <= (node vCPUs - 2) and ensure
+# llamacpp_threads <= limits.cpu (see warning emitted at apply time).
+llamacpp_resources:
+  requests:
+    cpu: "250m"
+    memory: "2Gi"
+  limits:
+    cpu: "6"
+    memory: "8Gi"
+
+# ============================================================================
+# API key
+# ============================================================================
+# Optional API key to enforce on llama-server. When non-empty:
+#   - llama-server is launched with --api-key (rejects requests missing the
+#     matching Authorization: Bearer header)
+#   - the chatbot uses the same value automatically (see chatbot_llm_api_key)
+# When empty (default), llama-server is unauthenticated and the chatbot ships
+# a sentinel value so the OpenAI SDK's non-empty validator passes. The sentinel
+# is harmless because the server isn't checking.
+# Generate a real key with: openssl rand -hex 24 ; export LLAMACPP_API_KEY=...
+llamacpp_api_key: "{{ lookup('env', 'LLAMACPP_API_KEY') | default('', true) }}"
+
+# After a successful rollout, delete any *.gguf / *.gguf.partial under
+# {{ llamacpp_hostpath_dir }} that isn't the currently-configured model file.
+# Keeps disk usage bounded across model swaps. Set false to retain everything
+# (useful for A/B testing where you re-point llamacpp_model_url repeatedly).
+# false: keep the Llama-3.2-1B file on the volume as the rollback target.
+llamacpp_prune_old_models: false

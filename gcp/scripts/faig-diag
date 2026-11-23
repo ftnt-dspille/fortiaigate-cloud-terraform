@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""faig-diag: persistent logging and one-command diagnostics for the FAIG lab VM.
+
+Pod logs disappear when a pod restarts and `kubectl logs` only keeps what the node
+rotates, so by the time someone asks "why did students see 500s at 10:42?" the
+evidence is usually gone. This keeps it.
+
+  faig-diag sample          one health line + new events (a systemd timer runs it every minute)
+  faig-diag status          the last health lines and the most recent events, one screen
+  faig-diag events [N]      the last N (default 40) gateway / llama / pod events, newest last
+  faig-diag snapshot        a tar.gz with everything needed to troubleshoot (printed path)
+
+Files (all under /var/log/faig-diag, rotated daily, 14 days):
+  health.log             one k=v line per minute: llama health + latency, GPU, restarts, 5xx counts
+  gateway-events.log     WARN/ERROR lines from the FortiAIGate pods (llm-gateway, api, guardrail ...)
+  llama-events.log       llama-server warnings/errors, truncated prompts
+  llama-proxy.log        every request through the llama.cpp proxy (status, timings, connection reuse)
+  pod-events.log         pod restarts (reason, exit code, last log lines) and k8s Warning events
+
+Read them with: grep, `faig-diag events`, or ship the snapshot. Stdlib only; run as root.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.request
+from pathlib import Path
+
+LOG = Path(os.environ.get("FAIG_DIAG_DIR", "/var/log/faig-diag"))
+STATE = Path(os.environ.get("FAIG_DIAG_STATE", "/var/lib/faig-diag"))
+KUBECTL = (shutil.which("kubectl") and ["kubectl"]) or ["k3s", "kubectl"]
+os.environ.setdefault("KUBECONFIG", "/etc/rancher/k3s/k3s.yaml")
+
+# (namespace, deployment, container or None, file, line filter)
+# Expected chatter: billing notes, and guardrail DENYs (those are the product working, not faults).
+NOISE = re.compile(r"model carries no cache-read rate|guardrail action")
+GW_LEVEL = re.compile(r"\b(WARN|ERROR|FATAL|PANIC)\b")
+LLAMA_LEVEL = re.compile(r"^\d+\.\d+\.\d+\.\d+ [EW] |truncated = 1|failed|error", re.I)
+FAIGATE = ["llm-gateway", "api", "guardrail", "policy-guard", "logd", "dlp-scanner"]
+KEY_DEPLOYS = [
+    ("fortiaigate", d, None) for d in FAIGATE
+] + [("fortiaigate", "vllm-server", None), ("fortiaigate", "triton-server", None),
+     ("llamacpp", "llamacpp", "llama-server"), ("llamacpp", "llamacpp", "llama-proxy")]
+
+
+def sh(cmd: list[str], timeout: int = 60) -> str:
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.stdout + (p.stderr if p.returncode else "")
+    except Exception as e:  # noqa: BLE001
+        return f"[{cmd[0]} failed: {e}]"
+
+
+def kc(*args: str, timeout: int = 60) -> str:
+    return sh(KUBECTL + list(args), timeout)
+
+
+def now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def parse_ts(s: str) -> dt.datetime | None:
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z", s)
+    if not m:
+        return None
+    frac = (m.group(2) or ".0")[1:7].ljust(6, "0")
+    return dt.datetime.strptime(m.group(1) + "." + frac, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=dt.timezone.utc)
+
+
+def state_get(name: str) -> dt.datetime | None:
+    try:
+        return dt.datetime.fromisoformat((STATE / name).read_text().strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def state_put(name: str, v: dt.datetime) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    (STATE / name).write_text(v.isoformat())
+
+
+def new_lines(ns: str, deploy: str, container: str | None) -> list[tuple[dt.datetime, str]]:
+    """Log lines since the last sample (exactly once each), with k8s timestamps."""
+    key = f"{ns}.{deploy}.{container or 'main'}"
+    last = state_get(key)
+    args = ["-n", ns, "logs", f"deploy/{deploy}", "--timestamps"]
+    if container:
+        args += ["-c", container]
+    args += ["--since-time", last.strftime("%Y-%m-%dT%H:%M:%SZ")] if last else ["--since", "90s"]
+    out: list[tuple[dt.datetime, str]] = []
+    newest = last
+    for ln in kc(*args, timeout=45).splitlines():
+        ts_s, _, rest = ln.partition(" ")
+        ts = parse_ts(ts_s)
+        if ts is None or (last and ts <= last):
+            continue
+        out.append((ts, rest))
+        newest = max(newest, ts) if newest else ts
+    if newest:
+        state_put(key, newest)
+    return out
+
+
+def append(name: str, lines: list[str]) -> None:
+    if lines:
+        LOG.mkdir(parents=True, exist_ok=True)
+        with open(LOG / name, "a") as f:
+            f.write("\n".join(lines) + "\n")
+
+
+def http(url: str, timeout: float = 4.0) -> tuple[int, float, str]:
+    t = time.time()
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status, (time.time() - t) * 1000, r.read(200000).decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, (time.time() - t) * 1000, ""
+    except Exception:  # noqa: BLE001
+        return 0, (time.time() - t) * 1000, ""
+
+
+def llama_url() -> str:
+    ip = kc("-n", "llamacpp", "get", "svc", "llamacpp", "-o", "jsonpath={.spec.clusterIP}").strip()
+    return f"http://{ip}:8080"
+
+
+def pods_json() -> list[dict]:
+    try:
+        return json.loads(kc("get", "pods", "-A", "-o", "json", timeout=45)).get("items", [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def restarts(pod: dict) -> int:
+    return sum(c.get("restartCount", 0) for c in pod.get("status", {}).get("containerStatuses", []) or [])
+
+
+def gpu() -> str:
+    o = sh(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"]).strip()
+    return o.replace(", ", "/") if "/" in o.replace(", ", "/") and "failed" not in o else "na"
+
+
+def sample() -> None:
+    ts = now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    base = llama_url()
+    code, ms, _ = http(base + "/health")
+    _, _, metrics = http(base + "/metrics")
+    met = {m.group(1): m.group(2) for m in re.finditer(r"^llamacpp:(\w+) ([\d.]+)", metrics, re.M)}
+    # events
+    gw_lines: list[str] = []
+    counts = {"transient": 0, "unhealthy": 0}
+    for d in FAIGATE:
+        for t, ln in new_lines("fortiaigate", d, None):
+            if NOISE.search(ln) or not GW_LEVEL.search(ln):
+                continue
+            gw_lines.append(f"{t.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]}Z [{d}] {ln[:600]}")
+            counts["transient"] += "provider_transient" in ln
+            counts["unhealthy"] += "every bound credential is unhealthy" in ln
+    append("gateway-events.log", gw_lines)
+    ll = [f"{t.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]}Z {ln[:500]}"
+          for t, ln in new_lines("llamacpp", "llamacpp", "llama-server") if LLAMA_LEVEL.search(ln)]
+    append("llama-events.log", ll)
+    px = [f"{ln}" for _, ln in new_lines("llamacpp", "llamacpp", "llama-proxy") if "req=" in ln and "/health" not in ln and "GET /metrics" not in ln]
+    append("llama-proxy.log", px)
+    non200 = sum(1 for ln in px if not re.search(r"status=200 ", ln))
+    # restarts -> pod-events
+    prev = {}
+    try:
+        prev = json.loads((STATE / "restarts.json").read_text())
+    except Exception:  # noqa: BLE001
+        pass
+    cur, ev = {}, []
+    pods = pods_json()
+    for p in pods:
+        name = f"{p['metadata']['namespace']}/{p['metadata']['name']}"
+        cur[name] = restarts(p)
+        if name in prev and cur[name] > prev[name]:
+            for c in p["status"].get("containerStatuses", []):
+                lt = (c.get("lastState") or {}).get("terminated")
+                if lt:
+                    ev.append(f"{ts} RESTART {name} container={c['name']} count={c['restartCount']} reason={lt.get('reason')} "
+                              f"exit={lt.get('exitCode')} finished={lt.get('finishedAt')}")
+                    tail = kc("-n", p["metadata"]["namespace"], "logs", p["metadata"]["name"], "-c", c["name"], "--previous", "--tail=25")
+                    ev += ["    | " + x[:300] for x in tail.splitlines()[-25:]]
+    (STATE).mkdir(parents=True, exist_ok=True)
+    (STATE / "restarts.json").write_text(json.dumps(cur))
+    for ln in kc("get", "events", "-A", "--field-selector", "type=Warning", "--sort-by=.lastTimestamp",
+                 "-o", "custom-columns=T:.lastTimestamp,NS:.metadata.namespace,OBJ:.involvedObject.name,REASON:.reason,MSG:.message", "--no-headers").splitlines():
+        t = parse_ts(ln.split()[0]) if ln.split() else None
+        last = state_get("k8s-events")
+        if t and (not last or t > last):
+            ev.append(f"{ts} K8S-WARNING {ln[:400]}")
+    state_put("k8s-events", now())
+    append("pod-events.log", ev)
+    llama_pod = [p for p in pods if p["metadata"]["namespace"] == "llamacpp"]
+    gw_pod = [p for p in pods if p["metadata"]["name"].startswith("llm-gateway")]
+    line = (f"ts={ts} llama_health={code} llama_ms={ms:.0f} gpu_mib={gpu()} "
+            f"llama_busy={met.get('requests_processing', 'na')} llama_deferred={met.get('requests_deferred', 'na')} "
+            f"llama_restarts={sum(restarts(p) for p in llama_pod)} gw_restarts={sum(restarts(p) for p in gw_pod)} "
+            f"gw_transient={counts['transient']} gw_unhealthy={counts['unhealthy']} "
+            f"proxy_reqs={len(px)} proxy_non200={non200}")
+    append("health.log", [line])
+    if code != 200 or non200 or counts["transient"] or counts["unhealthy"]:
+        print("ATTENTION:", line)
+
+
+def tail_file(name: str, n: int) -> list[str]:
+    p = LOG / name
+    return p.read_text(errors="replace").splitlines()[-n:] if p.exists() else []
+
+
+def status() -> None:
+    print("== health (last 8 min)")
+    print("\n".join(tail_file("health.log", 8)) or "(none yet - is the timer running?)")
+    events()
+
+
+def events(n: int = 40) -> None:
+    print(f"== last {n} events (gateway / llama / pods)")
+    rows = []
+    for f in ("gateway-events.log", "llama-events.log", "pod-events.log"):
+        rows += [f"{f.split('-')[0]:<8} {x}" for x in tail_file(f, n)]
+    stamp = re.compile(r"\d{4}-\d\d-\d\dT[\d:.]+")
+    rows.sort(key=lambda r: (stamp.search(r) or [""])[0] if stamp.search(r) else "")
+    print("\n".join(rows[-n:]) or "(no events recorded)")
+
+
+def snapshot() -> None:
+    stamp = now().strftime("%Y%m%dT%H%M%SZ")
+    d = LOG / "snapshots" / f"faig-diag-{stamp}"
+    d.mkdir(parents=True, exist_ok=True)
+
+    def put(name: str, text: str) -> None:
+        (d / name).write_text(text)
+
+    put("00-summary.txt", f"snapshot {stamp}\nhost {os.uname().nodename}\n" + sh(["uptime"]) + sh(["date", "-u"]))
+    put("pods.txt", kc("get", "pods", "-A", "-o", "wide"))
+    put("events-all.txt", kc("get", "events", "-A", "--sort-by=.lastTimestamp"))
+    put("nodes.txt", kc("describe", "node"))
+    put("llamacpp-deployment.yaml", kc("-n", "llamacpp", "get", "deploy,svc,cm", "-o", "yaml"))
+    put("gpu.txt", sh(["nvidia-smi"]) + sh(["nvidia-smi", "--query-compute-apps=process_name,used_memory", "--format=csv"]))
+    put("host.txt", sh(["df", "-h"]) + sh(["free", "-m"]) + sh(["ls", "-la", "/var/lib/llamacpp"]))
+    put("k3s-journal.txt", sh(["journalctl", "-u", "k3s", "-n", "300", "--no-pager"]))
+    kern = [x for x in sh(["dmesg", "-T"]).splitlines() if re.search(r"oom|killed process|nvrm|xid", x, re.I)]
+    put("dmesg-gpu-oom.txt", "\n".join(kern[-100:]))
+    base = llama_url()
+    for ep in ("health", "props", "slots", "metrics"):
+        c, ms, body = http(f"{base}/{ep}")
+        put(f"llama-{ep}.txt", f"HTTP {c} {ms:.0f}ms\n{body[:60000]}")
+    pods = pods_json()
+    for p in pods:
+        ns, name = p["metadata"]["namespace"], p["metadata"]["name"]
+        if ns not in ("fortiaigate", "llamacpp", "chatbot"):
+            continue
+        for c in p["spec"]["containers"]:
+            put(f"log-{ns}-{name}-{c['name']}.txt", kc("-n", ns, "logs", name, "-c", c["name"], "--timestamps", "--tail=3000", timeout=90))
+            if any(cs["name"] == c["name"] and cs.get("restartCount") for cs in p["status"].get("containerStatuses", [])):
+                put(f"log-{ns}-{name}-{c['name']}.PREVIOUS.txt", kc("-n", ns, "logs", name, "-c", c["name"], "--previous", "--timestamps", "--tail=3000", timeout=90))
+        if restarts(p) or p["status"].get("phase") != "Running":
+            put(f"describe-{ns}-{name}.txt", kc("-n", ns, "describe", "pod", name))
+    for f in ("health.log", "gateway-events.log", "llama-events.log", "llama-proxy.log", "pod-events.log"):
+        put(f"faig-diag-{f}", "\n".join(tail_file(f, 5000)))
+    tgz = d.with_suffix(".tgz")
+    with tarfile.open(tgz, "w:gz") as t:
+        t.add(d, arcname=d.name)
+    shutil.rmtree(d)
+    print(tgz)
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "sample":
+        sample()
+    elif cmd == "status":
+        status()
+    elif cmd == "events":
+        events(int(sys.argv[2]) if len(sys.argv) > 2 else 40)
+    elif cmd == "snapshot":
+        snapshot()
+    else:
+        print(__doc__)
+        sys.exit(2)

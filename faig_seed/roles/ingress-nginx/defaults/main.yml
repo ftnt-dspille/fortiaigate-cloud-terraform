@@ -1,0 +1,15 @@
+---
+# Role defaults — precedence rank #2. Override per-host in inventory/hosts.yml.
+
+# Helm chart version
+ingress_nginx_chart_version: 4.11.3
+
+# Shared default TLS — a single self-signed cert loaded as the controller's
+# default-ssl-certificate, so any Ingress without its own TLS section still
+# gets HTTPS via this cert.
+ingress_default_tls_secret: ingress-default-tls
+ingress_default_tls_namespace: ingress-nginx
+# Default Common Name; SANs include primary_iface_ip + external_address + extra_tls_sans.
+ingress_default_tls_cn: "{{ external_address }}"
+ingress_default_tls_validity_days: 3650
+ingress_default_tls_dir: /etc/rancher/k3s/ingress-tls

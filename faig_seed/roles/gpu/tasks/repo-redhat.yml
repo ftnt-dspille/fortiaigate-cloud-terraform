@@ -1,0 +1,17 @@
+---
+# Add NVIDIA's CUDA dnf repo so cuda-drivers-<branch> and the container
+# toolkit packages resolve. Idempotent — the `creates:` guard makes the
+# config-manager call a no-op once the .repo file is in place.
+
+- name: Resolve NVIDIA CUDA repo distro slug
+  ansible.builtin.set_fact:
+    cuda_repo_distro: "rhel{{ ansible_distribution_major_version }}"
+    cuda_repo_arch: "{{ 'x86_64' if ansible_architecture == 'x86_64' else ansible_architecture }}"
+
+- name: Add NVIDIA CUDA dnf repo
+  ansible.builtin.command:
+    cmd: >-
+      dnf config-manager --add-repo
+      https://developer.download.nvidia.com/compute/cuda/repos/{{ cuda_repo_distro }}/{{ cuda_repo_arch }}/cuda-{{ cuda_repo_distro }}.repo
+  args:
+    creates: "/etc/yum.repos.d/cuda-{{ cuda_repo_distro }}.repo"

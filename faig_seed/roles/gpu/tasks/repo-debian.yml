@@ -1,0 +1,48 @@
+---
+# Add NVIDIA's CUDA apt repo so cuda-drivers-<branch>, nvidia-utils-<branch>,
+# and the container toolkit packages resolve. Idempotent — runs every play
+# but does no work once cuda-keyring is installed.
+#
+# This file is extracted from the conditional driver-debian.yml so the repo
+# is always available regardless of whether a driver install is needed —
+# nvidia-smi.yml depends on the repo to find nvidia-utils-<branch>.
+
+- name: Resolve NVIDIA CUDA repo distro slug
+  ansible.builtin.set_fact:
+    # NVIDIA's paths: "ubuntu2204", "ubuntu2404", "debian12".
+    cuda_repo_distro: >-
+      {{
+        (ansible_distribution | lower)
+        ~ (ansible_distribution_version | replace('.', '')
+           if ansible_distribution == 'Ubuntu'
+           else ansible_distribution_major_version)
+      }}
+    cuda_repo_arch: "{{ 'x86_64' if ansible_architecture == 'x86_64' else ansible_architecture }}"
+
+- name: Check if cuda-keyring is already installed
+  ansible.builtin.shell: |
+    set -o pipefail
+    dpkg-query -W -f='${Status}\n' cuda-keyring 2>/dev/null | grep -q 'install ok installed'
+  args:
+    executable: /bin/bash
+  register: cuda_keyring_status
+  changed_when: false
+  failed_when: false
+
+- name: Download NVIDIA CUDA repo keyring
+  ansible.builtin.get_url:
+    url: "https://developer.download.nvidia.com/compute/cuda/repos/{{ cuda_repo_distro }}/{{ cuda_repo_arch }}/cuda-keyring_1.1-1_all.deb"
+    dest: /tmp/cuda-keyring.deb
+    mode: "0644"
+  when: cuda_keyring_status.rc != 0
+
+- name: Install cuda-keyring (adds /etc/apt/sources.list.d/cuda-*.list)
+  ansible.builtin.apt:
+    deb: /tmp/cuda-keyring.deb
+  when: cuda_keyring_status.rc != 0
+  register: cuda_keyring_installed
+
+- name: Refresh apt cache after adding CUDA repo
+  ansible.builtin.apt:
+    update_cache: true
+  when: cuda_keyring_installed.changed | default(false)

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ llamacpp_pvc_name }}
+  namespace: {{ llamacpp_namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ llamacpp_storage_size }}
+  storageClassName: ""
+  volumeName: {{ llamacpp_pv_name }}

@@ -1,0 +1,29 @@
+---
+# Role defaults — precedence rank #2 (just above role-level fallbacks).
+#
+# These live in defaults/ rather than group_vars/all.yml so that values set in
+# inventory's `vars:` block (precedence rank #3) actually override them. If
+# these were in group_vars/all.yml, the inventory override wouldn't win.
+#
+# See:
+# https://docs.ansible.com/ansible/latest/playbook_guide/playbooks_variables.html#understanding-variable-precedence
+
+# Host-level toggle for the NVIDIA stack. When true, this role installs the
+# driver, NVIDIA Container Toolkit, and k8s-device-plugin. Override per host
+# in inventory/hosts.yml.
+gpu_enabled: false
+
+# NVIDIA driver branch to install when gpu_enabled and no working driver is
+# present. Use a major-version string from NVIDIA's CUDA repo:
+#   "550" (long-term), "560", "570", "open" (open-kernel variants), etc.
+nvidia_driver_branch: "550"
+
+# Pinned version of the NVIDIA k8s-device-plugin DaemonSet manifest.
+# https://github.com/NVIDIA/k8s-device-plugin/releases
+nvidia_device_plugin_version: "v0.17.0"
+
+# If the driver install or kernel module load fails (e.g. Secure Boot, unsigned
+# modules rejected), set true to permit the role to proceed after printing the
+# error. The toolkit + device plugin won't function without a working driver,
+# so this is only useful when staging an install across multiple reboots.
+gpu_allow_driver_failure: false

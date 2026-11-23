@@ -1,0 +1,165 @@
+---
+# Install k3s with a minimal, ingress-friendly configuration.
+#
+# Key choices:
+# - Traefik is disabled (we install ingress-nginx instead)
+# - ServiceLB (klipper-lb) is disabled (ingress-nginx uses hostNetwork directly on ens3)
+# - Node IP is pinned to the primary interface so k3s doesn't pick the wrong one
+# - The external/DNAT address is added as a TLS SAN so the kubeconfig works from outside
+
+- name: Check if k3s is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_binary
+
+- name: Check installed k3s version
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: k3s_installed_version
+  changed_when: false
+  failed_when: false
+  when: k3s_binary.stat.exists
+
+- name: Ensure k3s config directory exists
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write k3s config file
+  # 0644 (not 0600): on a k3s node `kubectl` is a symlink to the k3s binary, and
+  # every kubectl invocation re-reads this file for server-side flags. Mode 0600
+  # makes non-root callers print three "permission denied" WARN lines and fall
+  # back to defaults. The file contains no secrets — TLS SANs, CIDRs, disable
+  # list — so world-readable is appropriate. Root still owns and writes it.
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  register: k3s_config
+
+- name: Ensure k3s config is world-readable (idempotent fix for older installs)
+  # `template` only updates mode when the rendered content changes, so existing
+  # installs where the file was previously written 0600 stay at 0600 across a
+  # rerun. Forcing it here is a no-op when already correct.
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Download k3s install script
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /tmp/k3s-install.sh
+    mode: "0755"
+  when: not k3s_binary.stat.exists or k3s_version not in (k3s_installed_version.stdout | default(''))
+
+- name: Install k3s
+  ansible.builtin.command: /tmp/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    # We pass all configuration via /etc/rancher/k3s/config.yaml, so no extra exec args.
+    INSTALL_K3S_EXEC: "server"
+  when: not k3s_binary.stat.exists or k3s_version not in (k3s_installed_version.stdout | default(''))
+  register: k3s_install
+
+- name: Restart k3s if config changed (and we didn't just install it)
+  ansible.builtin.systemd:
+    name: k3s
+    state: restarted
+  when:
+    - k3s_config.changed
+    - not (k3s_install.changed | default(false))
+
+- name: Ensure k3s service is enabled and running
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started
+
+- name: Wait for k3s API to be ready
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 6443
+    delay: 2
+    timeout: 120
+
+- name: Wait for kubeconfig to be written
+  ansible.builtin.wait_for:
+    path: /etc/rancher/k3s/k3s.yaml
+    timeout: 60
+
+- name: Wait for node to be Ready
+  ansible.builtin.shell: |
+    set -o pipefail
+    /usr/local/bin/k3s kubectl get nodes --no-headers | awk '{print $2}' | grep -qx Ready
+  args:
+    executable: /bin/bash
+  register: node_ready
+  retries: 30
+  delay: 5
+  until: node_ready.rc == 0
+  changed_when: false
+
+- name: Keep the source kubeconfig root-only (0600)
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/k3s.yaml
+    mode: "0600"
+    owner: root
+    group: root
+
+- name: Look up SSH user passwd entry
+  # We need the home directory; getent returns [passwd, uid, gid, gecos, home, shell]
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ ansible_user }}"
+
+- name: Ensure ~/.kube directory exists for the SSH user
+  ansible.builtin.file:
+    path: "{{ getent_passwd[ansible_user][4] }}/.kube"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0700"
+
+- name: Install kubeconfig at ~/.kube/config for the SSH user
+  # Copies the cluster's kubeconfig into the user's standard location so that
+  # kubectl/helm/k9s pick it up automatically without needing $KUBECONFIG.
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "{{ getent_passwd[ansible_user][4] }}/.kube/config"
+    remote_src: true
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"
+
+- name: Export KUBECONFIG in the SSH user's .bashrc
+  # The `kubectl` binary on a k3s node is a symlink to k3s; the wrapper hardcodes
+  # KUBECONFIG=/etc/rancher/k3s/k3s.yaml when KUBECONFIG is unset, which blocks the
+  # standard ~/.kube/config fallback. Setting it explicitly routes around that.
+  ansible.builtin.lineinfile:
+    path: "{{ getent_passwd[ansible_user][4] }}/.bashrc"
+    line: 'export KUBECONFIG=$HOME/.kube/config'
+    regexp: '^export KUBECONFIG='
+    create: true
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0644"
+
+- name: Generate an externally-usable kubeconfig
+  # Replaces 127.0.0.1 with the external/DNAT address so the file works from outside.
+  ansible.builtin.shell: |
+    sed 's|server: https://127.0.0.1:6443|server: https://{{ external_address }}:6443|' \
+      /etc/rancher/k3s/k3s.yaml > /etc/rancher/k3s/k3s-external.yaml
+    chmod 0644 /etc/rancher/k3s/k3s-external.yaml
+  changed_when: false
+
+- name: Show external kubeconfig location
+  ansible.builtin.debug:
+    msg: >
+      External kubeconfig written to /etc/rancher/k3s/k3s-external.yaml
+      Fetch it with: scp {{ ansible_user }}@{{ ansible_host }}:/etc/rancher/k3s/k3s-external.yaml ~/.kube/config

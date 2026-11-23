@@ -1,0 +1,51 @@
+---
+# Install Helm 3 from the official script.
+
+- name: Check if helm is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/helm
+  register: helm_binary
+
+- name: Download Helm install script
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    dest: /tmp/get-helm-3.sh
+    mode: "0755"
+  when: not helm_binary.stat.exists
+
+- name: Install Helm
+  ansible.builtin.command: /tmp/get-helm-3.sh
+  when: not helm_binary.stat.exists
+  changed_when: true
+
+- name: Verify helm version
+  ansible.builtin.command: helm version --short
+  register: helm_version_output
+  changed_when: false
+
+- name: Show installed helm version
+  ansible.builtin.debug:
+    msg: "Helm installed: {{ helm_version_output.stdout }}"
+
+- name: Ensure KUBECONFIG is set for root for subsequent helm commands
+  # The kubernetes.core.helm module uses KUBECONFIG; we point it at the k3s file.
+  ansible.builtin.lineinfile:
+    path: /root/.bashrc
+    line: 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml'
+    create: true
+    mode: "0644"
+
+- name: Install python kubernetes library (needed by ansible kubernetes.core modules)
+  ansible.builtin.apt:
+    name:
+      - python3-kubernetes
+      - python3-yaml
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Install python kubernetes library (RHEL family)
+  ansible.builtin.dnf:
+    name:
+      - python3-kubernetes
+    state: present
+  when: ansible_os_family == "RedHat"

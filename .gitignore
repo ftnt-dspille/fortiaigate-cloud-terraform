@@ -1,0 +1,61 @@
+# ── Terraform ────────────────────────────────────────────────────────────────
+# Provider caches and state are local-only: state carries resource IDs and
+# (for some providers) sensitive values. tfvars carry your project IDs, SSH
+# keys and source CIDRs. Commit the *.tfvars.example files, never the real ones.
+.terraform/
+.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!gpu.tfvars.example
+# Per-VM zone placement written by gcp/scripts/gpu_place.sh
+placement.tfvars.json
+# The lock file IS committed on purpose (pins provider versions for everyone).
+
+# ── Secrets and credentials -- never commit ─────────────────────────────────
+# Local settings loaded by the Makefiles (FAIG_LICENSE_POOL, FAIG_ADMIN_PASS,
+# FAIG_ACME_EMAIL, FAIG_DNS_SA_SECRET, ...). The DNS-01 solver key lives in
+# gcp/.env.dns-sa-key.json -- a live GCP service-account key.
+.env
+.env.*
+*.lic
+*.pem
+*.key
+# License-pool ledger (which serial is assigned to which VM)
+faig_alloc.json*
+
+# ── Fortinet-distributed artifacts -- not ours to redistribute ──────────────
+# The FAIG helm chart tar is dropped into faig_seed/ by you (see README,
+# Prerequisites). FAIG install tars likewise never live in this repo.
+faig_seed/FAIG_helm_chart-*.tar
+
+# ── Class data (student rosters, handouts, per-lab vars) ────────────────────
+# These carry student identities and credentials.
+class*.csv
+*roster*
+*.handout.*
+handout*.csv
+vars.*.yml
+class_logins.csv
+
+# ── OS / editor / tooling junk ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+.logs/
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

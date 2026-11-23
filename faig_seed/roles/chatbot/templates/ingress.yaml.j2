@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ chatbot_release_name }}
+  namespace: {{ chatbot_namespace }}
+  annotations:
+    # Streamlit serves WebSockets and streaming responses; keep the connection
+    # alive long enough for slow LLM completions.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  ingressClassName: {{ chatbot_ingress_class }}
+  rules:
+    # No host filter — matches any Host header. ingress-nginx's default-ssl-certificate
+    # provides the TLS cert; no per-Ingress tls: block needed.
+    - http:
+        paths:
+          # The container is launched with `--server.baseUrlPath=/chat`, so Streamlit
+          # serves /chat natively. No rewrite annotation required — we just hand the
+          # request through with its path intact.
+          - path: {{ chatbot_ingress_path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ chatbot_release_name }}
+                port:
+                  number: {{ chatbot_service_port }}

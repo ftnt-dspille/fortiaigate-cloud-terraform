@@ -1,0 +1,8 @@
+---
+- name: Restart k3s
+  # Needed after installing the NVIDIA Container Toolkit so containerd reloads
+  # and auto-detects the nvidia runtime. toolkit.yml flushes handlers
+  # explicitly so this fires before the device plugin is applied.
+  ansible.builtin.systemd:
+    name: k3s
+    state: restarted

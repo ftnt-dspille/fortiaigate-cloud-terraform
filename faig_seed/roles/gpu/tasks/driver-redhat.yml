@@ -1,0 +1,10 @@
+---
+# Install the NVIDIA driver on RHEL-family hosts. Assumes prereqs.yml and
+# repo-redhat.yml have already run. Reboot is typically required.
+
+- name: Install NVIDIA driver (cuda-drivers-{{ nvidia_driver_branch }})
+  ansible.builtin.dnf:
+    name: "cuda-drivers-{{ nvidia_driver_branch }}"
+    state: present
+  async: 1800
+  poll: 30

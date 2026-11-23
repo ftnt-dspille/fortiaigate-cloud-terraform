@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ llamacpp_pv_name }}
+  labels:
+    app: llamacpp
+spec:
+  capacity:
+    storage: {{ llamacpp_storage_size }}
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  hostPath:
+    path: {{ llamacpp_hostpath_dir }}
+    type: DirectoryOrCreate
+  claimRef:
+    namespace: {{ llamacpp_namespace }}
+    name: {{ llamacpp_pvc_name }}

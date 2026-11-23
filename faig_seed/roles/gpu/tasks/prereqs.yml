@@ -1,0 +1,27 @@
+---
+# Minimal host packages the rest of the gpu role assumes. Must run BEFORE the
+# lspci check in main.yml — Ubuntu server images don't always ship pciutils.
+
+- name: Install gpu-role prereqs (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - pciutils            # provides lspci
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - software-properties-common
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+
+- name: Install gpu-role prereqs (RHEL family)
+  ansible.builtin.dnf:
+    name:
+      - pciutils
+      - dnf-plugins-core
+      - kernel-devel
+      - kernel-headers
+    state: present
+  when: ansible_os_family == "RedHat"
