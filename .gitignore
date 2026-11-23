@@ -33,8 +33,11 @@ placement.tfvars.json
 faig_alloc.json*
 
 # ── Fortinet-distributed artifacts -- not ours to redistribute ──────────────
-# The FAIG helm chart tar is dropped into faig_seed/ by you (see README,
-# Prerequisites). FAIG install tars likewise never live in this repo.
+# The FAIG install tars are dropped into faig-images/ (any FAIG_*.tar* from
+# your Fortinet support channel; see faig-images/README.md). The FAIG helm
+# chart tar goes to faig_seed/. Neither is committed to this repo.
+faig-images/*
+!faig-images/README.md
 faig_seed/FAIG_helm_chart-*.tar
 
 # ── Class data (student rosters, handouts, per-lab vars) ────────────────────

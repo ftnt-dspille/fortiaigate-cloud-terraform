@@ -59,14 +59,14 @@ cp terraform.tfvars.example terraform.tfvars
 make build
 ```
 
-This runs `copy_faig_images.sh` (pulls FAIG tars from an SSH-reachable host you
-control) then `build.sh` (runs the Ansible playbook). You need:
+The tars come from wherever they are (picked automatically):
 
-```bash
-export FAIG_TARS_HOST=<host holding the FAIG tars>   # any SSH-reachable host
-export FAIG_TARS_PORT=11001                          # its SSH port
-# optional: FAIG_TARS_USER (default fortinet), FAIG_TARS_DIR (default ~/faig-images)
-```
+- **`faig-images/` in the repo root** (default) -- download the FAIG tars
+  there once (gitignored; see `faig-images/README.md`); the copy script pushes
+  them straight to the VM's public IP. Nothing to configure.
+- **A remote host** -- set `FAIG_TARS_HOST`/`FAIG_TARS_PORT` (and optionally
+  `FAIG_TARS_USER`/`FAIG_TARS_DIR`) and the tars are pushed from that host
+  directly to the cloud VM (it needs internet egress, not inbound reachability).
 
 The FAIG helm chart tar (`FAIG_helm_chart-*.tar`, Fortinet-distributed, not in
 this repo) must be in `../faig_seed/` first -- see the root README,

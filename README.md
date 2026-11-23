@@ -59,11 +59,13 @@ Start with the cloud you want:
 FortiAIGate is a licensed Fortinet product; its artifacts are **not committed
 here**. You need, from your Fortinet support channel / your own environment:
 
-1. **FAIG install tars** (`FAIG_*.tar*` -- container images + the helm chart),
-   placed on any SSH-reachable host you control. The copy scripts take that
-   host's address via `FAIG_TARS_HOST` / `FAIG_TARS_PORT` / `FAIG_TARS_USER` /
-   `FAIG_TARS_DIR` (a Fabric Studio pod, a jump host, a server -- anything your
-   laptop can SSH to).
+1. **FAIG install tars** (`FAIG_*.tar*` -- container images + the helm chart
+   that ships in the bundle), obtained from your Fortinet support channel /
+   your own environment. **Drop them into `faig-images/` on your laptop**
+   (gitignored; see `faig-images/README.md`) and the copy scripts push them up
+   automatically -- no other host needed. If the tars already live on some
+   SSH-reachable host (a pod, a server), point `FAIG_TARS_HOST` /
+   `FAIG_TARS_PORT` at it instead and the scripts relay from there.
 2. **The FAIG helm chart tar** (`FAIG_helm_chart-*.tar`), dropped into
    `faig_seed/` (gitignored). `build.sh` checks for it and stops with a clear
    message if it is missing.

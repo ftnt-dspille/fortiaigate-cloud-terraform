@@ -53,6 +53,15 @@ all:
         external_address: $CLOUD_IP
 EOF
 
+echo "=== Verifying FAIG tars are on the cloud VM ==="
+# Fail fast, before a multi-minute playbook run: copy_faig_images.sh puts
+# them there ('make build' runs it first).
+ssh $SSH_OPTS "$CLOUD_USER@$CLOUD_IP" "ls ~/faig-images/FAIG_*.tar* >/dev/null 2>&1" || {
+  echo "ERROR: no FAIG_*.tar* in ~/faig-images on $CLOUD_IP." >&2
+  echo "  Run scripts/copy_faig_images.sh first ('make build' does it for you)." >&2
+  exit 1
+}
+
 echo "=== Running faig_seed playbook (CPU mode, no GPU) ==="
 ansible-playbook -i "$INVENTORY" "$FAIG_SEED/site.yml" \
   -e faig_primary_interface=eth0 -e primary_interface=eth0
@@ -60,7 +69,13 @@ ansible-playbook -i "$INVENTORY" "$FAIG_SEED/site.yml" \
 echo "=== Importing FAIG container images into k3s containerd ==="
 ssh "$CLOUD_USER@$CLOUD_IP" << 'REMOTE'
 set -e
-for f in ~/faig-images/FAIG_*.tar; do
+shopt -s nullglob
+tars=(~/faig-images/FAIG_*.tar)
+if [ ${#tars[@]} -eq 0 ]; then
+  echo "ERROR: no FAIG_*.tar in ~/faig-images on the VM." >&2
+  exit 1
+fi
+for f in "${tars[@]}"; do
   case "$f" in
     *helm_chart*) echo "Skipping helm chart: $f"; continue ;;
   esac

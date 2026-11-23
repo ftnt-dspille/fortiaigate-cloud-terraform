@@ -38,8 +38,9 @@ Key design points:
 
 - terraform >= 1.5, gcloud CLI logged in, an SSH keypair
 - ansible + `kubernetes.core` collection (for the `faig_seed` playbook)
-- **FAIG install tars** on an SSH-reachable host (`FAIG_*.tar*`) -- not in this
-  repo; see the root README, Prerequisites
+- **FAIG install tars** on this laptop in `faig-images/` (default) or on an
+  SSH-reachable host (`FAIG_TARS_HOST`) -- not in this repo; see the root
+  README, Prerequisites and `faig-images/README.md`
 - **FAIG helm chart tar** dropped into `../faig_seed/` (`FAIG_helm_chart-*.tar`)
 - **One `.lic` per running VM** -- single-occupancy serials
 - python3 (stdlib only; no pip packages needed by the scripts)
@@ -69,7 +70,8 @@ FAIG_DNS_SA_SECRET=clouddns-dns01-solver-sa
 # Admin password for the FAIG admin API (else: macOS Keychain item faig-lab-admin)
 FAIG_ADMIN_PASS=...
 
-# Where the FAIG tars live (only needed for the build phase)
+# Where the FAIG tars live -- only for the REMOTE tar mode. With tars in
+# faig-images/ on this laptop, nothing here is needed for the build.
 FAIG_TARS_HOST=lab.example.com
 FAIG_TARS_PORT=11001
 ```
@@ -81,11 +83,22 @@ make init
 make build
 ```
 
+The tars come from wherever they are (picked automatically):
+
+- **`faig-images/` in the repo root** (default) -- download the FAIG tars
+  there once (gitignored; see `faig-images/README.md`); the copy script pushes
+  them up through the IAP tunnel. Nothing to configure.
+- **A remote host** -- set `FAIG_TARS_HOST`/`FAIG_TARS_PORT` (and optionally
+  `FAIG_TARS_USER`/`FAIG_TARS_DIR`) and the tars relay from there through the
+  same tunnel. Set `FAIG_TARS_DIR` to a local path only if you want to
+  override the local dir.
+
 `make build` = `terraform apply` with the CPU profile (`e2-standard-4`,
-pd-standard) + `copy_faig_images.sh` (streams the tars from
-`$FAIG_TARS_HOST` through the IAP tunnel onto the VM) + `build.sh` (runs the
-`faig_seed` playbook: installs k3s, imports the FAIG container images, stages
-the helm chart -- **without starting FAIG**).
+pd-standard) + `copy_faig_images.sh` + `build.sh` (runs the `faig_seed`
+playbook: installs k3s, imports the FAIG container images, stages the helm
+chart -- **without starting FAIG**). It verifies the tars are on the VM and
+that the disk has room before starting, and fails fast with a clear message
+otherwise.
 
 ## 3. Snapshot to an image
 

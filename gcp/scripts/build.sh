@@ -48,6 +48,14 @@ trap iap_cleanup EXIT
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
+# Fail fast, before a multi-minute playbook run: the container-image tars must
+# be on the VM (copy_faig_images.sh puts them there; `make build` runs it).
+ssh -p "$SSH_PORT" $SSH_OPTS "$SSH_TARGET" "ls ~/faig-images/FAIG_*.tar* >/dev/null 2>&1" || {
+  echo "ERROR: no FAIG_*.tar* in ~/faig-images on $VM_NAME." >&2
+  echo "  Run scripts/copy_faig_images.sh first ('make build' does it for you)." >&2
+  exit 1
+}
+
 INVENTORY=$(mktemp /tmp/faig-cloud-inventory.XXXX.yml)
 trap 'rm -f "$INVENTORY"; iap_cleanup' EXIT
 
@@ -74,10 +82,16 @@ echo "=== Running faig_seed playbook (CPU mode, no GPU) ==="
 ansible-playbook -i "$INVENTORY" "$FAIG_SEED/site.yml" \
   -e faig_primary_interface=ens4 -e primary_interface=ens4
 
-echo "=== Staging 8.0.2 helm chart ==="
+echo "=== Staging helm chart (version from the FAIG bundle) ==="
 ssh -p "$SSH_PORT" $SSH_OPTS "$SSH_TARGET" << 'REMOTE'
 set -e
-tar xf ~/faig-images/FAIG_helm_chart-V8.0.2-build6191-FORTINET.tar -C ~/
+CHART_TAR="$(ls ~/faig-images/FAIG_helm_chart-*.tar 2>/dev/null | head -1)"
+if [ -z "$CHART_TAR" ]; then
+  echo "ERROR: no FAIG_helm_chart-*.tar in ~/faig-images on the VM." >&2
+  echo "  The FAIG bundle normally ships one alongside the image tars." >&2
+  exit 1
+fi
+tar xf "$CHART_TAR" -C ~/
 head -4 ~/fortiaigate/Chart.yaml
 [ -f ~/my-values.yaml ] || cp ~/fortiaigate/values.yaml ~/my-values.yaml
 mkdir -p ~/fortiaigate/files/licenses
@@ -86,7 +100,13 @@ REMOTE
 echo "=== Importing FAIG container images into k3s containerd ==="
 ssh -p "$SSH_PORT" $SSH_OPTS "$SSH_TARGET" << 'REMOTE'
 set -e
-for f in ~/faig-images/FAIG_*.tar; do
+shopt -s nullglob
+tars=(~/faig-images/FAIG_*.tar)
+if [ ${#tars[@]} -eq 0 ]; then
+  echo "ERROR: no FAIG_*.tar in ~/faig-images on the VM." >&2
+  exit 1
+fi
+for f in "${tars[@]}"; do
   case "$f" in
     *helm_chart*) echo "Skipping helm chart: $f"; continue ;;
     *deploy-docker-compose-cli*) echo "Skipping helper: $f"; continue ;;
