@@ -50,8 +50,9 @@ Start with the cloud you want:
 | Terraform >= 1.5 | both | `brew install terraform` |
 | gcloud CLI (authed: `gcloud auth login`) | gcp | `brew install --cask google-cloud-sdk` |
 | Azure CLI (authed: `az login`) | azure | `brew install azure-cli` |
-| ansible + kubernetes.core collection | both | `pip install ansible && ansible-galaxy collection install kubernetes.core` |
+| ansible (run from the repo root so `faig_seed/` resolves) | both | `pip install ansible` then `ansible-galaxy collection install -r faig_seed/requirements.yml` (kubernetes.core, community.crypto, community.general) |
 | python3 | scripts | preinstalled on macOS |
+| jq | azure `make stop` / `make start` | `brew install jq` |
 | An SSH keypair | both | `ssh-keygen -t ed25519` |
 
 ### Fortinet-distributed artifacts (not in this repo)
@@ -65,10 +66,16 @@ here**. You need, from your Fortinet support channel / your own environment:
    (gitignored; see `faig-images/README.md`) and the copy scripts push them up
    automatically -- no other host needed. If the tars already live on some
    SSH-reachable host (a pod, a server), point `FAIG_TARS_HOST` /
-   `FAIG_TARS_PORT` at it instead and the scripts relay from there.
-2. **The FAIG helm chart tar** (`FAIG_helm_chart-*.tar`), dropped into
-   `faig_seed/` (gitignored). `build.sh` checks for it and stops with a clear
-   message if it is missing.
+   `FAIG_TARS_PORT` at it instead and the scripts relay from there. (RELAY
+   mode only: load the key the target VM accepts into your ssh-agent first --
+   `ssh-add ~/.ssh/id_ed25519` -- the relay's last hop authenticates through
+   the forwarded agent. LOCAL mode uses the default key file.)
+2. **The FAIG helm chart tar** (`FAIG_helm_chart-*.tar`) -- needed in TWO
+   gitignored places: `faig_seed/` (the playbook stages it from there) and
+   `faig-images/` (it is pushed up with the other tars; the build then
+   extracts the bundle's chart from it). Copy it into both:
+   `cp FAIG_helm_chart-*.tar faig_seed/ faig-images/` -- `build.sh` checks
+   for it and stops with a clear message if either is missing.
 3. **One `.lic` license file per running VM** -- single-occupancy serials. Hand
    them to `make license FILE=...`, or point `FAIG_LICENSE_POOL` at a directory
    of `.lic` files and let `tools/faig_license_pool.py` allocate one seat per VM.

@@ -8,7 +8,8 @@ TF = terraform
 # Local, gitignored settings (.env*), e.g. FAIG_LICENSE_POOL=/path/to/Lab Licenses/FAIG
 # FAIG_ACME_EMAIL=<email> enables a real Let's Encrypt cert (via cert-manager + Cloud DNS)
 -include .env
-export FAIG_LICENSE_POOL FAIG_ACME_EMAIL FAIG_DNS_SA_SECRET
+export FAIG_LICENSE_POOL FAIG_ACME_EMAIL FAIG_DNS_SA_SECRET FAIG_ADMIN_PASS FAIG_KEYCHAIN_ACCOUNT FAIG_LICENSE_IN_USE
+export FAIG_TARS_HOST FAIG_TARS_PORT FAIG_TARS_USER FAIG_TARS_DIR
 
 # INSTANCE selects which FAIG VM to target (1, 2, 3, ...). Default 1.
 # COUNT=N runs N VMs: it is remembered (placement.tfvars.json), and up/start/stop

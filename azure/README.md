@@ -25,20 +25,29 @@ Phase 1 (CPU build)                    Phase 2 (GPU run)
 ## Prerequisites
 
 ```bash
-# Azure CLI
+# Azure CLI (authed: az login), with quota for the GPU instance size
+# (default Standard_NC4as_T4_v3 -- check: az vm list-usage -l <region>)
 brew install azure-cli
 az login
 
 # Terraform
 brew install terraform
 
-# Ansible + kubernetes.core collection
+# Ansible + the collections in ../faig_seed/requirements.yml
 pip install ansible
-ansible-galaxy collection install kubernetes.core
+ansible-galaxy collection install -r ../faig_seed/requirements.yml
+
+# jq (used by make stop / make start to read terraform output)
+brew install jq
 
 # SSH key (if you don't have one)
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
 ```
+
+Local, gitignored settings live in `azure/.env` (same format as `gcp/.env`):
+the Makefile loads it (`-include .env`) and exports the `FAIG_*` variables
+(`FAIG_LICENSE_POOL`, `FAIG_ADMIN_PASS`, `FAIG_TARS_*`, ...) to the scripts --
+you never need to `source` it.
 
 ## Workflow
 

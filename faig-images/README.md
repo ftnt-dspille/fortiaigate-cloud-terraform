@@ -31,5 +31,16 @@ cp /path/to/FAIG_*.tar* faig-images/
   host that already has the tars; the copy scripts then relay from there
   instead (useful when the tars live on a pod or a faster server).
 
-The helm chart tar that `faig_seed/` needs for the playbook is a separate
-file: see the root README, Prerequisites.
+The helm chart tar is needed in TWO gitignored places:
+`faig_seed/FAIG_helm_chart-*.tar` (the playbook stages it from there) and
+this directory (it is pushed up with the other tars; the build then extracts
+the bundle's chart from it):
+
+```bash
+cp /path/to/FAIG_helm_chart-*.tar faig-images/ faig_seed/
+```
+
+If the tars live on some SSH-reachable host instead (REMOTE relay mode),
+load the key that host accepts into your ssh-agent first (`ssh-add`) --
+the relay's last hop authenticates through the forwarded agent. LOCAL mode
+uses the default key file and needs no agent.

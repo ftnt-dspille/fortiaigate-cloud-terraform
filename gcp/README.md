@@ -37,13 +37,47 @@ Key design points:
 ## Prerequisites
 
 - terraform >= 1.5, gcloud CLI logged in, an SSH keypair
-- ansible + `kubernetes.core` collection (for the `faig_seed` playbook)
+- ansible + the collections in `faig_seed/requirements.yml`
+  (`ansible-galaxy collection install -r faig_seed/requirements.yml`)
+- **GPU quota**: the NVIDIA_L4_GPUS regional quota and GPUS_ALL_REGIONS must
+  be > 0 for at least one `us-` zone (`scripts/gpu_zones.sh` prints both per
+  zone). The GPU hold itself consumes the same quota while it exists.
 - **FAIG install tars** on this laptop in `faig-images/` (default) or on an
   SSH-reachable host (`FAIG_TARS_HOST`) -- not in this repo; see the root
   README, Prerequisites and `faig-images/README.md`
-- **FAIG helm chart tar** dropped into `../faig_seed/` (`FAIG_helm_chart-*.tar`)
+- **FAIG helm chart tar** in `../faig_seed/` **and** `../faig-images/`
+  (`FAIG_helm_chart-*.tar`)
 - **One `.lic` per running VM** -- single-occupancy serials
 - python3 (stdlib only; no pip packages needed by the scripts)
+
+### Fast path: start from an existing FAIG VM image
+
+Steps 2-3 (build, snapshot) exist to produce one thing: an image with k3s +
+the FAIG chart baked in. If you already have such an image -- a disk export
+of a previous class VM in a GCS bucket, or one from your Fortinet support
+channel -- skip them entirely:
+
+```bash
+# One-time: import the exported disk tar as a bootable image
+# (~30-60 min for a ~100 GB export; unattended)
+gcloud compute images create faig-baseline \
+  --source-uri=gs://<bucket>/<export>.tar.gz \
+  --guest-os-features=UEFI_COMPATIBLE,GVNIC,VIRTIO_SCSI_MULTIQUEUE
+```
+
+Point `source_image` in `gpu.tfvars` at it, then run `make up` directly.
+`make up` self-heals everything else on that image: it installs the NVIDIA
+driver if the image lacks one (one automatic reset-and-retry), bootstraps
+org + admin if the FAIG install is fresh, takes a license from the pool, and
+runs the 11 readiness checks. The image must be a disk export of a
+*completed* build (k3s + chart), not a bare Ubuntu image.
+
+To make your own baseline tar at the end of a class week:
+
+```bash
+gcloud compute disks export <vm-disk-name> --zone=<zone> \
+  --destination-uri=gs://<bucket>/faig-baseline-<date>.tar.gz
+```
 
 ## 1. Configure
 
@@ -75,6 +109,12 @@ FAIG_ADMIN_PASS=...
 FAIG_TARS_HOST=lab.example.com
 FAIG_TARS_PORT=11001
 ```
+
+The Makefile loads this file itself (`-include .env`) and exports the
+`FAIG_*` variables to the scripts -- you never need to `source` it. Values
+may contain spaces (make parses `KEY=value` to end-of-line), which is why
+sourcing it in a shell can break; if you want the vars in your own shell,
+export the ones you need by hand.
 
 ## 2. Build phase (cheap CPU VM)
 
