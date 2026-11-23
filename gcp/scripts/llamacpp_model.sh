@@ -70,11 +70,19 @@ if ! k rollout status deploy/llamacpp --timeout=420s; then
   exit 1
 fi
 POD=$(k get pod -l app=llamacpp -o jsonpath='{.items[0].metadata.name}')
+# Probe llama-server in its OWN container: the llama-proxy sidecar is only
+# added later by llamacpp_proxy.sh, so a first swap on a freshly deployed VM
+# has no proxy yet -- probing it made every such swap report a false
+# "model did not load" even though the model had loaded.
+http() {  # http <path>: GET llama-server from inside its container
+  k exec "$POD" -c llama-server -- sh -c \
+    "if command -v wget >/dev/null 2>&1; then wget -qO- -T 5 'http://127.0.0.1:8080/$1'; else curl -s -m 5 'http://127.0.0.1:8080/$1'; fi" 2>/dev/null
+}
 for _ in $(seq 1 60); do
-  k exec "$POD" -c llama-proxy -- wget -qO- http://127.0.0.1:8080/health 2>/dev/null | grep -q ok && break
+  http health | grep -q ok && break
   sleep 5
 done
-k exec "$POD" -c llama-proxy -- wget -qO- http://127.0.0.1:8080/props 2>/dev/null |
-  grep -o '"model_path":"[^"]*"' || { echo "  ERROR: model did not load" >&2; exit 1; }
+http props | grep -o '"model_path":"[^"]*"' ||
+  { echo "  ERROR: model did not load" >&2; exit 1; }
 echo "  workshop model now $FILE"
 REMOTE
