@@ -96,6 +96,7 @@ place:
 # converge: place, then terraform onto the held GPUs; drop holds whose VM is gone
 # (vm_count shrank). Running VMs keep theirs -- free while they run.
 converge: place
+	@test -f placement.tfvars.json || { echo "ERROR: gpu_place wrote no placement.tfvars.json -- refusing to apply (the apply would use the default zone and stockout there)"; exit 1; }
 	$(TF) apply -auto-approve $(GPU_VARS)
 	./scripts/gpu_place.sh --release
 

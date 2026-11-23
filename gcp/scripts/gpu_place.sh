@@ -53,9 +53,12 @@ set -uo pipefail
 # Interruption safety: every hold this run creates is tracked; on exit, Ctrl-C
 # or kill, any it created but did not keep is deleted, so none are left billing.
 #
-# placement.tfvars.json gets vm_count + zones; the Makefile passes it after
-# gpu.tfvars, so it wins. vm_count = COUNT if given, else the last placement,
-# else gpu.tfvars -- and never below the highest targeted instance.
+# placement.tfvars.json gets vm_count + zones, and zone = zones[0] repeated:
+# the apply must never reach var.zone's stockout-prone default (that is how a
+# 12-round hold win in us-east4-c still got applied in us-central1-a once).
+# The Makefile passes it after gpu.tfvars, so it wins. vm_count = COUNT if
+# given, else the last placement, else gpu.tfvars -- and never below the
+# highest targeted instance.
 #
 # MOVE="2": relocate VM 2 now to another zone (same path as a dry zone).
 # Env: ONLY="1 3" (VMs to bring up; default all), COUNT, GPU_REGIONS (default
@@ -361,6 +364,6 @@ for n in $(seq 1 "$VM_COUNT"); do
   ZONES+=("$z")
 done
 
-python3 -c 'import json,sys; json.dump({"vm_count": int(sys.argv[2]), "zones": sys.argv[3:]}, open(sys.argv[1], "w"), indent=2)' \
+python3 -c 'import json,sys; json.dump({"vm_count": int(sys.argv[2]), "zone": sys.argv[3] if len(sys.argv) > 3 else "", "zones": sys.argv[3:]}, open(sys.argv[1], "w"), indent=2)' \
   "$OUT" "$VM_COUNT" "${ZONES[@]}"
 echo "placement: vm_count=$VM_COUNT zones=${ZONES[*]}"
