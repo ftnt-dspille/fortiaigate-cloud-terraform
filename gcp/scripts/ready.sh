@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Idempotent: it inspects each state before acting, so re-running it converges
 # and never duplicates work. Covers the whole chain an instructor needs before
-# `make faig-class` adds the student workspaces:
+# the class tooling (../api) adds the student workspaces:
 #
 #   1. VM power   -> if the VM is stopped, hold its GPU (gpu_place.sh) and start
 #                    it (start.sh also heals stale engine pods + waits for scanning).
@@ -132,7 +132,7 @@ print('ready' if ok else 'notready')"
     done
   else
     echo "  NOTE: UI cert for $HOSTNAME is self-signed (FAIG_ACME_EMAIL unset)." \
-      "Set it in cloud/faig_gcp/.env for a trusted cert, then re-run: make up"
+      "Set it in gcp/.env for a trusted cert, then re-run: make up"
   fi
 fi
 
@@ -164,7 +164,7 @@ elif [ -n "${FAIG_LICENSE_POOL:-}" ]; then
 else
   echo "  WARNING: license not detected, no LICENSE=<file.lic> and no FAIG_LICENSE_POOL."
   echo "           Upload it (make license FILE=...) before class,"
-  echo "           or set FAIG_LICENSE_POOL in cloud/faig_gcp/.env and re-run: make up"
+  echo "           or set FAIG_LICENSE_POOL in gcp/.env and re-run: make up"
 fi
 
 # --- 2b. Settle --------------------------------------------------------------
@@ -177,9 +177,9 @@ WAIT_MIN="${WAIT_MIN:-25}" "$SCRIPT_DIR/start.sh" "$VM_NAME"
 
 # --- 3. Authoritative readiness gate ----------------------------------------
 echo ""
-echo "== running the 9 readiness checks =="
+echo "== running the readiness checks =="
 "$SCRIPT_DIR/test.sh" "$VM_NAME"
 
 echo ""
 echo "== ready: cloud FortiAIGate is up, licensed, scanning and reachable. =="
-echo "   Next: create/verify student workspaces with  make faig-class  (from the repo root)"
+echo "   Next (optional, class day): student workspaces via ../api/faig_class.py"

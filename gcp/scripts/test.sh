@@ -4,7 +4,7 @@ set -euo pipefail
 # Test FAIG 8.0.2 scanning functionality.
 #
 # The post-deploy check for the lab image: everything a class needs before
-# `make faig-class` adds the students.
+# the class tooling (../api) adds the students.
 #
 # Prerequisites:
 #   - FAIG deployed from the lab image (deploy_gpu.sh)

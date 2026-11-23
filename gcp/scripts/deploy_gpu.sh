@@ -85,7 +85,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 FAIG_SEED="${FAIG_SEED_DIR:-$REPO_ROOT/faig_seed}"
 
 # Provision the cert-manager DNS-01 solver SA key Secret on a fresh VM if it
-# isn't already there. The key file is gitignored (cloud/faig_gcp/.env.dns-sa-key.json).
+# isn't already there. The key file is gitignored (gcp/.env.dns-sa-key.json).
 # This is what makes a brand-new instance zero-touch for Let's Encrypt.
 if [ -n "${FAIG_DNS_SA_SECRET:-}" ] && [ -f "$TF_DIR/.env.dns-sa-key.json" ]; then
   echo "=== Step 1a: Ensuring cert-manager DNS-01 solver Secret exists ==="

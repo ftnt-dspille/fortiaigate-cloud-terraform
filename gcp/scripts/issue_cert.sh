@@ -15,7 +15,7 @@ set -euo pipefail
 # otherwise converged (deploy_gpu.sh was skipped because the VM did not change).
 #
 # Usage: issue_cert.sh [vm-name]
-#   Needs FAIG_ACME_EMAIL + FAIG_DNS_SA_SECRET + cloud/faig_gcp/.env.dns-sa-key.json
+#   Needs FAIG_ACME_EMAIL + FAIG_DNS_SA_SECRET + gcp/.env.dns-sa-key.json
 #   for the Let's Encrypt path (the Makefile exports these from .env).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

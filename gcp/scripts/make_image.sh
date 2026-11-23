@@ -13,9 +13,10 @@ set -euo pipefail
 
 IMAGE_NAME="${1:-faig-build-$(date +%Y%m%d-%H%M%S)}"
 
-PROJECT=$(terraform -chdir="$(git rev-parse --show-toplevel)/cloud/faig_gcp" output -raw project_id 2>/dev/null || gcloud config get-value project)
-ZONE=$(terraform -chdir="$(git rev-parse --show-toplevel)/cloud/faig_gcp" output -raw zone 2>/dev/null || gcloud config get-value compute/zone)
-VM_NAME=$(terraform -chdir="$(git rev-parse --show-toplevel)/cloud/faig_gcp" output -json vm_names | python3 -c "import sys,json; print(json.load(sys.stdin)[0])")
+TF_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT=$(terraform -chdir="$TF_DIR" output -raw project_id 2>/dev/null || gcloud config get-value project)
+ZONE=$(terraform -chdir="$TF_DIR" output -raw zone 2>/dev/null || gcloud config get-value compute/zone)
+VM_NAME=$(terraform -chdir="$TF_DIR" output -json vm_names | python3 -c "import sys,json; print(json.load(sys.stdin)[0])")
 
 echo "=== Stopping VM: $VM_NAME ==="
 gcloud compute instances stop "$VM_NAME" --zone="$ZONE"
