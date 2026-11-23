@@ -68,8 +68,9 @@ else
 fi
 
 # Verify the agent has a key -- without it, the scp to the cloud VM will
-# silently fall back to password auth and hang.
-if ! ssh-add -L | grep -q .; then
+# silently fall back to password auth and hang. LOCAL mode uses the default
+# key file directly and skips this check (see gcp/scripts/copy_faig_images.sh).
+if [ "$MODE" = remote ] && ! ssh-add -L | grep -q .; then
   echo "ERROR: ssh-agent has no keys. Add the key that's on the cloud VM:"
   echo "  ssh-add ~/.ssh/id_ed25519"
   exit 1

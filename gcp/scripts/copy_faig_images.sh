@@ -64,7 +64,10 @@ else
     "cd $FAIG_TARS_DIR && wc -c FAIG_*.tar* 2>/dev/null | tail -1" | awk '{print int($1 / 1024)}' || echo 0)
 fi
 
-if ! ssh-add -L | grep -q .; then
+# The agent matters only for REMOTE mode: the relay's last hop authenticates
+# via the laptop's forwarded agent. LOCAL mode scp authenticates with the
+# default key file, so no agent is needed there.
+if [ "$MODE" = remote ] && ! ssh-add -L | grep -q .; then
   echo "ERROR: ssh-agent has no keys. Run: ssh-add ~/.ssh/id_ed25519"
   exit 1
 fi
